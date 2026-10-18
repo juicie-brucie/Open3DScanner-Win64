@@ -62,3 +62,9 @@ _Append dated one-liners: what changed, which side, and the outcome. Newest last
   as the channel in `WINDOWS-FORK.md` §5.
 
 - `[win]` 2026-10-18 — repo `Open3DScanner-Win64` created (standalone: `origin` is this repo, `upstream` is the parent); `WINDOWS-FORK.md` and this file seeded from the parent at `dac0e7dedd6674335d7b4abb4e65f9efd540ccbc` (the contract pin's parent commit, §2). Contract pin not yet wired. Gate answered: the Windows build ships the same `obscan_*` surface (a superset; both scan libraries are build 3.5.3.260921) — see the parent's `docs/recon/findings/win64-surface.md`. Next: the Win64 toolchain so the header's `_Static_assert`s can compile (with Bruce).
+
+- `[mac]` 2026-10-18 — the initialization commits on this repo's `main` (the seed itself, the
+  `[win]` entry, §4's room rule, the pin row) were **direct pushes, not PRs — the bootstrap
+  exception**, recorded here so the history does not read as licence to skip §4. From the first
+  change after initialization, changes land through PRs with a verdict, once this repo's gate is
+  wired (the Windows port of `verify-pr`, §4).
