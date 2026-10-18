@@ -4,8 +4,9 @@
 //      fake context that captures the execute.before hook, then invokes that
 //      captured hook for each case. This is the "is the guard actually invoked"
 //      evidence: it runs the same default export OpenCode loads.
-//   C. the opencode.jsonc backstop actually contains every invariant token the
-//      evaluator uses, so the two layers cannot drift apart silently.
+//   C. the opencode.jsonc backstop is path-only: it carries the vendor path
+//      (read/edit) rules and NO shell rules — a static glob cannot see the room,
+//      and a repo-wide shell rule would police vocabulary everywhere.
 //
 // Run (no Node on PATH here): with VS Code's bundled Node —
 //   $env:ELECTRON_RUN_AS_NODE="1"
@@ -15,13 +16,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import plugin, {
-  DEFAULT_ROOM,
-  INJECTION_TOKENS,
-  VENDOR_TOKENS,
-  evaluate,
-  MATRIX,
-} from "../../.opencode/plugins/hw-guard/guard.mjs";
+import plugin, { DEFAULT_ROOM, VENDOR_TOKENS, evaluate, MATRIX } from "../../.opencode/plugins/hw-guard/guard.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const BUILD_ROOM = "C:\\Users\\Bruce\\Documents\\Github\\Open3DScanner-Win64-build";
@@ -31,16 +26,20 @@ function record(part, name, ok, detail) {
   results.push({ part, name, ok, detail });
 }
 
-// --- C first: the config backstop must carry every token ------------------
+// --- C: the static backstop must stay path-only --------------------------
 {
   const config = readFileSync(join(here, "..", "..", "opencode.jsonc"), "utf8");
-  const tokens = [...INJECTION_TOKENS, ...VENDOR_TOKENS];
-  const missing = tokens.filter((token) => !config.includes(token));
+  const missing = VENDOR_TOKENS.filter((token) => !config.includes(token));
+  const hasShellRule = /"action"\s*:\s*"shell"/.test(config);
   record(
     "C/config",
-    "every invariant token is present in opencode.jsonc",
-    missing.length === 0 && config.includes('"permissions"'),
-    missing.length ? `missing: ${missing.join(", ")}` : `${tokens.length} tokens present`,
+    "vendor path rules present, no repo-wide shell rules",
+    missing.length === 0 && !hasShellRule && config.includes('"permissions"'),
+    missing.length
+      ? `missing vendor tokens: ${missing.join(", ")}`
+      : hasShellRule
+        ? "a shell rule remains (cannot be room-scoped)"
+        : `${VENDOR_TOKENS.length} vendor tokens, 0 shell rules`,
   );
 }
 

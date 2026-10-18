@@ -1,23 +1,15 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  // Static backstop for the .opencode/plugins/hw-guard plugin: the same
-  // invariant patterns, enforced by Core even if the plugin is disabled or
-  // fails to load. Deny-only — it changes nothing else (no broad ask/allow
-  // rules). The cwd-sensitive listener-test rule lives in the plugin alone,
-  // because a static rule cannot see the working directory and would block a
-  // legitimate in-room run.
+  // Static backstop for the .opencode/plugins/hw-guard plugin. The guard is
+  // ROOM-SCOPED: its hardware rules fire only when the command's cwd is the
+  // hardware worktree. A static permission glob cannot see the cwd, so the shell
+  // side is plugin-only — a repo-wide shell rule would police vocabulary
+  // everywhere (exactly the false positives this guard had to drop). What
+  // remains here is path-based and safe repo-wide: deny read/edit of a vendor
+  // path, which fires on the artifact, never on prose about it. The clean-room
+  // wall itself is carried by per-role permission denies; this is a belt-and-
+  // braces layer for the two path actions.
   "permissions": [
-    { "action": "shell", "resource": "*SetDllDirectory*", "effect": "deny" },
-    { "action": "shell", "resource": "*AddDllDirectory*", "effect": "deny" },
-    { "action": "shell", "resource": "*SetDefaultDllDirectories*", "effect": "deny" },
-    { "action": "shell", "resource": "*LoadLibrary*", "effect": "deny" },
-    { "action": "shell", "resource": "*DYLD_INSERT_LIBRARIES*", "effect": "deny" },
-    { "action": "shell", "resource": "*LD_PRELOAD*", "effect": "deny" },
-    { "action": "shell", "resource": "*.recon-cache*", "effect": "deny" },
-    { "action": "shell", "resource": "*libOrbbecSDK*", "effect": "deny" },
-    { "action": "shell", "resource": "*lib_orbbec_scan*", "effect": "deny" },
-    { "action": "shell", "resource": "*liborbbec_scan*", "effect": "deny" },
-
     { "action": "read", "resource": "*.recon-cache*", "effect": "deny" },
     { "action": "read", "resource": "*libOrbbecSDK*", "effect": "deny" },
     { "action": "read", "resource": "*lib_orbbec_scan*", "effect": "deny" },
