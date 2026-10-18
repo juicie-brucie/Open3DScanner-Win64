@@ -1,8 +1,15 @@
 name: verify-pr
 
+# DISABLED ON THIS FORK: this workflow runs scripts/verify-pr.py, which is
+# macOS-shaped (it hardcodes /Users/brucemackay/... paths) and cannot run on the
+# Windows fork. Triggers are disabled so the public checks stay green. Restored
+# by the Windows verify-pr port (docs/recomp/WINDOWS-FORK.md §4; the prerequisite
+# for §8 item 3's CI wiring).
 on:
-  pull_request:
-    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+  # Restore with the port:
+  # pull_request:
+  #   types: [opened, synchronize, reopened]
 
 permissions:
   contents: read
