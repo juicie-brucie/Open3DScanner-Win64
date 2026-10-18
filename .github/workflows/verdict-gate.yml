@@ -1,13 +1,20 @@
 name: verdict-gate
 
+# DISABLED ON THIS FORK: this workflow runs scripts/verify-pr.py, which is
+# macOS-shaped (it hardcodes /Users/brucemackay/... paths) and cannot run on the
+# Windows fork. Triggers are disabled so the public checks stay green. Restored
+# by the Windows verify-pr port (docs/recomp/WINDOWS-FORK.md §4; the prerequisite
+# for §8 item 3's CI wiring).
 on:
+  workflow_dispatch:
+  # Restore with the port:
   # pull_request_target, not pull_request: the auto-verdict job must run from
   # the base branch's copy of this workflow, so a PR cannot edit the gate that
   # judges it. It checks out `main` and runs no PR code.
-  pull_request_target:
-    types: [opened, synchronize, reopened]
-  issue_comment:
-    types: [created]
+  # pull_request_target:
+  #   types: [opened, synchronize, reopened]
+  # issue_comment:
+  #   types: [created]
 
 permissions:
   contents: read
