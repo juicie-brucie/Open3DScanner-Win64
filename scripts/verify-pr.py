@@ -5,6 +5,7 @@ Usage:
     scripts/verify-pr.py <pr-number> [--build] [--no-build]
     scripts/verify-pr.py --tier <pr-number>      # print: script | agent
     scripts/verify-pr.py --selftest              # assert the tier table (CI runs this)
+    scripts/verify-pr.py --pincheck              # assert the recorded contract pin matches the header
 
 Works on git refs (no checkout required): fetches `refs/pull/<n>/head` and the
 PR's base branch, then checks the diff. Exit 0 = all gating checks passed;
@@ -29,6 +30,12 @@ Gating checks
                   an added tests/results/*.md record must be accompanied, in the
                   same PR, by an added raw artifact sharing its stem (typically
                   its .log, non-.md); addenda/corrections/analyses are exempt.
+  contract-pin    the fork's engine/include/openscanner/obscan_api.h must equal the
+                  parent commit + sha256 recorded in FORK-COORDINATION.md section 2;
+                  a mismatch fails, naming what is recorded and what is present.
+                  LIMIT: it compares the local copy to the RECORDED pin only - the
+                  gate does no network fetch, so it cannot detect that the parent
+                  has moved to a newer revision.
   plan            PLAN.md row syntax: unique numbers, valid statuses, well-formed.
                   Status moves and new rows are reported, not gated.
   archives        cited `sha256 <hex>` values in changed tests/results/*.md must
@@ -188,6 +195,55 @@ TIER_CASES = [
 ]
 
 
+# The contract pin — FORK-COORDINATION.md section 2 records the parent commit and
+# the sha256 of the header the fork consumes (a synced copy, single-sourced in
+# the parent). This check asserts the fork's working-tree header still equals the
+# recorded sha256.
+#
+# WHAT IT DOES NOT COVER: it reads the RECORDED pin and the local header only. It
+# does not fetch the parent and cannot know whether a newer parent revision
+# exists — the gate has no network access and should not have any. It catches a
+# local drift between the recorded pin and the copy, not upstream movement.
+PIN_DOC = "docs/recomp/FORK-COORDINATION.md"
+PIN_HEADER = "engine/include/openscanner/obscan_api.h"
+PIN_ROW = re.compile(
+    r"^\|\s*`Open3DScanner-Win64`\s*\(fork\)\s*\|\s*`([0-9a-f]{40})`\s*\|\s*`([0-9a-f]{64})`\s*\|",
+    re.M)
+
+
+def check_contract_pin():
+    """Return (ok, detail). Detail names BOTH values on a mismatch.
+
+    'Loudly and specifically' matters: on failure a reader must be able to tell
+    that the copy drifted, not that the check broke — so a parse/read problem
+    reports 'check broken', and a real drift reports recorded vs present.
+    """
+    try:
+        with open(PIN_DOC, encoding="utf-8") as fh:
+            doc = fh.read()
+    except OSError as e:
+        return False, f"check broken: cannot read {PIN_DOC} ({e})"
+    m = PIN_ROW.search(doc)
+    if not m:
+        return False, f"check broken: no fork pin row found in {PIN_DOC} section 2"
+    parent_commit, recorded = m.group(1), m.group(2)
+    try:
+        with open(PIN_HEADER, "rb") as fh:
+            raw = fh.read()
+    except OSError as e:
+        return False, f"check broken: cannot read {PIN_HEADER} ({e})"
+    # The pin records a git blob sha256 (LF content). A Windows checkout has CRLF
+    # in the working tree (core.autocrlf), so normalise CRLF -> LF before hashing;
+    # on macOS/Linux the bytes are unchanged.
+    present = hashlib.sha256(raw.replace(b"\r\n", b"\n")).hexdigest()
+    if present != recorded:
+        return False, (
+            f"HEADER DRIFTED from the recorded pin: FORK-COORDINATION section 2 records sha256 "
+            f"{recorded} (parent {parent_commit}), but {PIN_HEADER} has sha256 {present}. "
+            f"The synced copy no longer matches the pin — re-sync the header and update the pin.")
+    return True, f"recorded {recorded} == present {present}; parent {parent_commit}"
+
+
 def selftest():
     bad = []
     for path, want in TIER_CASES:
@@ -198,10 +254,16 @@ def selftest():
         bad.append("empty list: want agent (unknown -> require a verdict)")
     if tier_of(["docs/recomp/PLAN.md", "ui/app.js"]) != "agent":
         bad.append("mixed list: want agent (one agent path makes the PR agent)")
+    # The contract pin is asserted here too, so `--selftest` covers it wherever
+    # it runs (CI runs it on the base copy and the PR copy).
+    pin_ok, pin_detail = check_contract_pin()
     for b in bad:
         print("SELFTEST FAIL:", b)
+    if not pin_ok:
+        print("SELFTEST FAIL:", pin_detail)
     print(f"tier selftest: {len(TIER_CASES) + 2} cases, {'FAIL' if bad else 'ok'}")
-    return 1 if bad else 0
+    print(f"contract-pin: {'ok' if pin_ok else 'FAIL'} - {pin_detail}")
+    return 1 if (bad or not pin_ok) else 0
 
 
 def sh(args, **kw):
@@ -330,6 +392,10 @@ def main():
     self_test = "--selftest" in argv
     if self_test:
         return selftest()
+    if "--pincheck" in argv:
+        ok, detail = check_contract_pin()
+        print(f"contract-pin: {'ok' if ok else 'FAIL'} - {detail}")
+        return 0 if ok else 1
 
     nums = [a for a in argv if a.isdigit()]
     if not nums:
@@ -431,6 +497,11 @@ def main():
         "; ".join(f"no companion raw artifact in this PR: {p}" for p in missing) if missing
         else (f"{len(records)} record(s) with companion(s)" if records
               else "no records added"))
+
+    # 2c. contract pin: the fork's synced header must equal the recorded
+    #     FORK-COORDINATION.md section 2 pin (parent commit + sha256).
+    pin_ok, pin_detail = check_contract_pin()
+    add("contract-pin", pin_ok, pin_detail)
 
     # 3. plan: syntax gated; status moves and new rows reported only
     r = git("diff", "--name-only", f"{base_ref}...{head_ref}", "--", "docs/recomp/PLAN.md")
@@ -637,10 +708,10 @@ def main():
     for name, st, detail in report:
         print(f"| {name} | {st} | {detail.replace('|', '/')} |")
     print()
-    checks = ["whitespace", "run-records", "record-provenance", "plan", "archives",
+    checks = ["whitespace", "run-records", "record-provenance", "contract-pin", "plan", "archives",
               "ui-js-syntax", "build"]
     if os.name != "nt":
-        checks.insert(5, "hook")
+        checks.insert(6, "hook")
     print("Gating checks: " + ", ".join(checks) + ".")
     if os.name == "nt":
         print(f"hook: N/A here — {windows_guard_status()[1]}")
