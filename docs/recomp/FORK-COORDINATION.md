@@ -26,7 +26,7 @@ diverging.
 | Repo | Parent commit | `obscan_api.h` sha256 | Checked in CI |
 | --- | --- | --- | --- |
 | `Open3DScanner` (parent) | `main` (self) | regenerated per commit | n/a |
-| `Open3DScanner-Win64` (fork) | _(unset)_ | _(unset)_ | not yet wired |
+| `Open3DScanner-Win64` (fork) | `dac0e7dedd6674335d7b4abb4e65f9efd540ccbc` | `e6946c5e3110f179d4ac090e2c371d145bd108e2b068557f0ca56bbecd09018c` | not yet wired |
 
 ## 3. Platform registry
 
