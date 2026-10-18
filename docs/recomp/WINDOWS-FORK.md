@@ -77,6 +77,14 @@ Mirror the parent's mechanics, so an operator switching machines keeps one menta
   [`FORK-COORDINATION.md`](FORK-COORDINATION.md).
 - **Run records** (`tests/results/**`) keep the parent's discipline: one file per run, never
   edited in place, corrections as dated addenda.
+- **Rooms stay current when idle.** A room that is behind `origin/main` is missing merged PRs,
+  and its next task starts from a stale tree. So whenever a session is **not mid-turn**:
+  `git fetch`, then bring the room to `origin/main` — fast-forward when the room's branch is an
+  ancestor of `main`; when the branch's own commits are all landed (check with
+  `git cherry -v origin/main <branch>`: every line `-`), rebase onto `main` and lease-push the
+  role branch; never rebase a branch carrying an unlanded `+` commit. Never touch a room whose
+  session is working, and never update a room you do not own — the owner or the dispatcher does
+  it, and the dispatcher reports what it moved.
 
 ## 5. Coordination channel
 
