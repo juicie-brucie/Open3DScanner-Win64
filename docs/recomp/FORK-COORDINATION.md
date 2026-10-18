@@ -36,7 +36,9 @@ their pins are.
 | Platform | Artifact | Role | sha256 | Pinned by |
 | --- | --- | --- | --- | --- |
 | macOS arm64 | the parent's scan dylib | the parent's recon target | per its findings docs | parent findings |
-| Windows x64 | _(none yet — open question 1)_ | | | |
+| Windows x64 | `lib_orbbec_scan.dll` (installed CrealityScan 4.3.2) | the fork's recon target — carries the `obscan_*` surface | `9E7B677191A1460E620F2089D972CC231BCCF27666565A1DBF1FFA1566E48787` | [`win64-enum-parity.md`](../recon/findings/win64-enum-parity.md) |
+| Windows x64 | `OrbbecSDK.dll` | the SDK layer beside it — no readable `VS_VERSION_INFO` | `D36C0E8EA1E2123C5BC8288D8676608DA255BFFD8063E2B051DCF39C3FA79231` | same doc |
+| Windows x64 | `OrbbecGPL.dll` | beside it — no readable version resource | `2CB4622CFDAB5C5F4DAF9BE7992EF0D7012730940BA0F3C56D3D4DAFF67091DE` | same doc |
 
 ## 4. Seeding the fork
 
@@ -68,3 +70,24 @@ _Append dated one-liners: what changed, which side, and the outcome. Newest last
   exception**, recorded here so the history does not read as licence to skip §4. From the first
   change after initialization, changes land through PRs with a verdict, once this repo's gate is
   wired (the Windows port of `verify-pr`, §4).
+- `[win]` 2026-10-18 — the gate is wired: `verify-pr.py` ported to Windows (env-configurable
+  worktree paths, repo resolved from `origin` rather than `gh`'s inference, `gh`/`git` tool
+  resolution, the macOS-only halves reported NOT APPLICABLE with their reason rather than
+  passing), `--selftest` ported with the tier table kept identical to the parent's, and the
+  contract pin now **enforced** by `--pincheck`, which fails naming the recorded and present
+  values. The pin's value is meaningful for the first time: it has moved once upstream, so it
+  has something to catch. PRs #3 and #7.
+- `[win]` 2026-10-18 — the hardware backstop exists (§7 was previously unbacked on this
+  platform): an OpenCode plugin plus a static deny-only fallback in `opencode.jsonc`, the
+  cwd-sensitive listener-test rule kept in the plugin because a static rule cannot see the
+  working directory. PR #4. §8 item 4 closed.
+- `[win]` 2026-10-18 — session watcher ported to PowerShell (PR #5); platform registry row 1
+  set above; enum parity read against the installed DLL: 90 of 103 key values identical to
+  macOS, the 13 not found attributed **all Windows-side, zero macOS-side residuals**, and
+  tagged `[inferred]` rather than parity. PR #8.
+- `[win]` 2026-10-18 — known defect, worth carrying: `gh` resolves the repository from the
+  `upstream` remote rather than `origin`, so a bare `gh pr view N` in a fork room asks about
+  the **parent's** PR N and can report a merged PR as open (observed on #7, false `MERGED`).
+  Pass `-R` explicitly or set `GH_REPO`. `verify-pr.py` is unaffected because it derives the
+  repo from `origin`. Fix in flight for `watch-sessions.ps1`; the bash original has the same
+  latent behaviour.

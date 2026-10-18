@@ -64,7 +64,12 @@ What actually needs work, from the current tree (the loader and CMake already ca
 Mirror the parent's mechanics, so an operator switching machines keeps one mental model:
 
 - **One worktree per role, one session per worktree.** A room belongs to the session in it;
-  never share a checkout, never tear down someone else's room.
+  never share a checkout, never tear down someone else's room. **On this platform a room is a
+  clone, not a linked worktree**, and the reason is a platform bug rather than a preference:
+  OpenCode 2.0.32 on Windows reports `Is directory a git repo: no` for *every* tree, including
+  an ordinary clone with a real `.git` directory (`git rev-parse`, `git remote -v` and
+  `git status` all work in that same directory). The exception is named here so it cannot
+  quietly become the default, and it holds only while that detector is broken.
 - **Branches: `<role>/<thing>`** — `recon/win-plan1`, `build/win-loader`, `hw/win-plan2`,
   `dispatch/land-win-recon1`.
 - **Every change lands through a PR with a merge commit.** Never commit to `main`; never
@@ -72,6 +77,13 @@ Mirror the parent's mechanics, so an operator switching machines keeps one menta
 - **Two gates, same shapes:** a deterministic `verify-pr` run in CI (a Windows port of the
   script) plus an `openscanner/verifier` verdict on the exact head commit for agent-tier
   paths. Port the tier list; do not redefine it.
+- **Verdict comments put the anchored line FIRST.** One line,
+  `VERDICT: MERGEABLE|NEEDS CHANGE @ <40-char head sha>`, reasoning below it. The gate accepts
+  an anchored line anywhere in the comment, so this is hygiene rather than a requirement — but
+  a first-line convention survives a parser that later tightens, and it is legible to a human
+  skimming the thread. Exactly one verdict-shaped token, always the full 40 characters: a
+  short SHA, a quoted example, or a second token makes the comment inert and the merge blocks.
+  The gate fails closed at every rejection path, so an unparsed verdict never becomes a pass.
 - **Vendor artifacts are never committed.** `.recon-cache/` is gitignored in both repos; the
   Windows DLLs are a different target with their own sha256 pins, recorded in
   [`FORK-COORDINATION.md`](FORK-COORDINATION.md).
