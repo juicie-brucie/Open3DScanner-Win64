@@ -14,26 +14,36 @@ is script-gated or needs an agent verdict):
     agent tier   engine/**, tools/**, mesh/**, ui/**, scripts/**, tests/hardware/**,
                  any CMakeLists.txt, .github/**, .claude/**, docs/recon/**,
                  docs/recomp/{WINDOWS-FORK,FORK-COORDINATION}.md,
-                 tests/results/** addenda (*-correction.md, *-analysis.md)
-    script tier  everything else (run records, raw logs, .ips, PLAN.md,
-                 docs/recomp/** except the two fork documents above, CLAUDE.md,
-                 README.md, ...)
+                 tests/results/** (records, logs, addenda — #21)
+    script tier  everything else (PLAN.md, docs/recomp/** except the two fork
+                 documents above, CLAUDE.md, README.md, ...)
     An empty or unreadable file list is treated as agent tier.
 
 Gating checks
   whitespace      `git diff --check`
   run-records     tests/results/: no existing record modified, deleted or renamed
-                  in place (addenda *-correction.md / *-analysis.md excepted)
+                  in place (addenda *-correction.md / *-analysis.md / *-addendum.md excepted)
+  record-provenance
+                  an added tests/results/*.md record must be accompanied, in the
+                  same PR, by an added raw artifact sharing its stem (typically
+                  its .log, non-.md); addenda/corrections/analyses are exempt.
   plan            PLAN.md row syntax: unique numbers, valid statuses, well-formed.
                   Status moves and new rows are reported, not gated.
   archives        cited `sha256 <hex>` values in changed tests/results/*.md must
                   match a file named next to the citation in the PR; a citation
-                  that cannot be resolved fails. Added *.ips files are compared
-                  against ~/Library/Logs/DiagnosticReports/<same basename> when
-                  that directory exists (local best-effort; CI has no such dir).
-  hook            .claude/hooks/guard-hw-run.sh is executable, and the head hook
-                  satisfies the guard invariants (must-block / must-allow cases
-                  below). A base-vs-head probe matrix diff is reported.
+                  that cannot be resolved fails. This half ALWAYS runs. Added
+                  *.ips files are compared against
+                  ~/Library/Logs/DiagnosticReports/<same basename> when that
+                  directory exists; when it does not (any non-macOS host, CI),
+                  that half alone is reported N/A with the reason.
+  hook            macOS: .claude/hooks/guard-hw-run.sh is executable, and the
+                  head hook satisfies the guard invariants (must-block /
+                  must-allow cases below); a base-vs-head probe matrix diff is
+                  reported. Windows: that hook is bash/POSIX and the OpenCode
+                  replacement (charter section 8 item 4) may not be in the tree,
+                  so the check is reported N/A with its reason — never green.
+                  windows_guard_status() is the seam that will run the
+                  replacement's own invariants.
   ui-js-syntax    changed ui/*.js files must parse (`node --check`) — the
                   #54 class: a parse error kills the whole page.
   build           cmake configure + build + ctest -LE hardware; runs only when
@@ -42,23 +52,84 @@ Gating checks
 
 Reported only: tier, inventory (files not mentioned in the PR body), header
 (comment-only vs code change in obscan_api.h), modes, hook probe matrix diff.
+
+Fork notes (this copy also runs on Windows): gh and git are resolved via
+GH_BIN/GIT_BIN, then PATH, then known Windows installs; the hook-matrix roots
+(WT_HW/MAIN/WT_VERIFY) and the repo (VERIFY_PR_REPO) are environment-overridable
+with the macOS/parent values as defaults. Every check that is not applicable on
+this host is printed as N/A with its reason — never silently skipped.
 """
 import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 
-REPO = "juicie-brucie/Open3DScanner"
 STATUSES = {"TODO", "RECON", "SPEC-READY", "BUILD", "HW", "DONE", "BLOCKED"}
 
-WT_HW = "/Users/brucemackay/DevReposiMac/Open3DScanner-wt-hw"
-MAIN = "/Users/brucemackay/DevReposiMac/Open3DScanner"
-WT_VERIFY = "/Users/brucemackay/DevReposiMac/Open3DScanner-wt-verify"
+
+def _resolve_tool(env_var, name, fallbacks):
+    # Resolve an external tool once: env override, then PATH, then the known
+    # Windows install locations. Windows sessions here have neither gh nor git
+    # on PATH, so every subprocess below uses GH_BIN/GIT_BIN instead of a bare
+    # name, and never relies on the caller's PATH.
+    override = os.environ.get(env_var)
+    if override:
+        return override
+    found = shutil.which(name)
+    if found:
+        return found
+    for candidate in fallbacks:
+        if os.path.exists(candidate):
+            return candidate
+    return name  # absent everywhere; let the call fail loudly
+
+
+GH_BIN = _resolve_tool("GH_BIN", "gh", [r"C:\Users\Bruce\tools\gh\gh.exe"])
+GIT_BIN = _resolve_tool("GIT_BIN", "git",
+                        [r"C:\Users\Bruce\AppData\Local\GitHubDesktop\app-3.6.7\resources\app\git\cmd\git.exe"])
+
+
+def _repo_from_remote():
+    # gh cannot infer the repo here (it looks for git on PATH, which these
+    # sessions do not have), so read origin directly through GIT_BIN.
+    r = subprocess.run([GIT_BIN, "remote", "get-url", "origin"], capture_output=True, text=True)
+    if r.returncode != 0:
+        return None
+    m = re.search(r"github\.com[:/]+([^/]+/[^/]+?)(?:\.git)?$", r.stdout.strip())
+    return m.group(1) if m else None
+
+
+def _resolve_repo():
+    # The repo the gate judges. VERIFY_PR_REPO overrides; otherwise the
+    # checkout's own origin (the parent resolves to the parent, the fork's
+    # origin to the fork); the historical parent value is the fallback.
+    override = os.environ.get("VERIFY_PR_REPO")
+    if override:
+        return override
+    return _repo_from_remote() or "juicie-brucie/Open3DScanner"
+
+
+REPO = _resolve_repo()
+
+# Working-tree roots probed by the hook matrix. Defaults are the macOS layout so
+# macOS behaviour is unchanged; a Windows host sets these only if it has the
+# trees. Left unset on purpose here — nothing is guessed, and the hook check is
+# not applicable on Windows anyway (see check 5).
+WT_HW = os.environ.get("OPENSCANNER_WT_HW", "/Users/brucemackay/DevReposiMac/Open3DScanner-wt-hw")
+MAIN = os.environ.get("OPENSCANNER_MAIN", "/Users/brucemackay/DevReposiMac/Open3DScanner")
+WT_VERIFY = os.environ.get("OPENSCANNER_WT_VERIFY", "/Users/brucemackay/DevReposiMac/Open3DScanner-wt-verify")
 DEVICE_TEST = "./build/tests/hardware/device_message_listener_test/device_message_listener_test"
 DATA_TEST = "./build/tests/hardware/data_process_message_listener_test/data_process_message_listener_test"
+
+# The hardware guard the `hook` check exercises, and the Windows replacement the
+# swap point targets (charter section 8 item 4). The Windows guard's matrix
+# lives in tools/hw_guard_test; windows_guard_status() is where it gets wired.
+GUARD_PATH_UNIX = ".claude/hooks/guard-hw-run.sh"
+GUARD_PATH_WINDOWS = ".opencode/plugins/hw-guard/guard.mjs"
 
 # Paths whose review needs judgment (semantics, prose claims, or the gate itself).
 AGENT_PATTERNS = [
@@ -70,7 +141,10 @@ AGENT_PATTERNS = [
     # the Windows-fork charter and coordination file carry rules (the contract
     # pin, the two-writer rule) and deserve a verdict like docs/recon/**.
     r"^docs/recomp/(WINDOWS-FORK|FORK-COORDINATION)\.md$",
-    r"^tests/results/.*(-correction|analysis)\.md$",
+    # Every evidence artifact under tests/results/** — records, logs and addenda —
+    # is agent-tier (#21): the directory is the loop's highest-stakes artifact
+    # class, and an added record auto-merging unreviewed was the hole.
+    r"^tests/results/",
 ]
 
 
@@ -83,11 +157,11 @@ def sh(args, **kw):
 
 
 def git(*args):
-    return sh(["git"] + list(args))
+    return sh([GIT_BIN] + list(args))
 
 
 def git_bytes(*args):
-    return subprocess.run(["git"] + list(args), capture_output=True).stdout
+    return subprocess.run([GIT_BIN] + list(args), capture_output=True).stdout
 
 
 def sha256_bytes(b):
@@ -95,7 +169,7 @@ def sha256_bytes(b):
 
 
 def pr_files(pr):
-    r = sh(["gh", "api", f"repos/{REPO}/pulls/{pr}/files", "--paginate", "--jq", ".[].filename"])
+    r = sh([GH_BIN, "api", f"repos/{REPO}/pulls/{pr}/files", "--paginate", "--jq", ".[].filename"])
     if r.returncode != 0:
         return None
     return [l for l in r.stdout.splitlines() if l]
@@ -173,6 +247,24 @@ def check_hook_invariants(script_bytes):
     return bad
 
 
+def windows_guard_status():
+    """Report the Windows hardware guard (charter section 8 item 4).
+
+    Returns (result, detail). Until the OpenCode replacement is in this tree the
+    check is honestly N/A — never green — and the detail names the reason. When
+    the replacement lands, this function must run ITS invariants (the matrix in
+    tools/hw_guard_test/run.mjs) instead of returning N/A; that swap is the whole
+    point of the seam, so it stays a small change here.
+    """
+    if os.path.exists(GUARD_PATH_WINDOWS):
+        return ("N/A",
+                f"the Windows guard ({GUARD_PATH_WINDOWS}) is present but its invariants are not wired "
+                f"into this check yet — run tools/hw_guard_test/run.mjs, then wire it here")
+    return ("N/A",
+            f"no hardware guard to exercise: {GUARD_PATH_UNIX} is bash/POSIX and the OpenCode replacement "
+            f"({GUARD_PATH_WINDOWS}) is not in this tree (charter section 8 item 4)")
+
+
 def status_of(line):
     cells = line.split("|")
     return cells[3].strip() if len(cells) > 4 else "?"
@@ -194,7 +286,7 @@ def main():
         print(tier_of(files))
         return 0
 
-    r = sh(["gh", "pr", "view", pr, "--repo", REPO,
+    r = sh([GH_BIN, "pr", "view", pr, "--repo", REPO,
             "--json", "number,state,baseRefName,baseRefOid,headRefOid,body,url,mergeCommit"])
     if r.returncode != 0:
         print(f"ENV: gh pr view {pr} failed: {r.stderr.strip()}")
@@ -257,7 +349,8 @@ def main():
     for line in r.stdout.splitlines():
         st, path = line.split("\t")[0], line.split("\t")[-1]
         bn = os.path.basename(path)
-        is_addendum = bn.endswith("-correction.md") or bn.endswith("-analysis.md")
+        is_addendum = (bn.endswith("-correction.md") or bn.endswith("-analysis.md")
+                       or bn.endswith("-addendum.md"))
         if st.startswith("M"):
             if is_addendum:
                 addenda += 1
@@ -268,6 +361,20 @@ def main():
     add("run-records", not bad,
         "; ".join(bad) if bad else
         (f"{addenda} modified addenda allowed" if addenda else "no modifications"))
+
+    # 2b. added records need a companion raw artifact in the same PR (#21)
+    r = git("diff", "--name-status", f"{base_ref}...{head_ref}", "--", "tests/results/")
+    added_res = [l.split("\t")[-1] for l in r.stdout.splitlines() if l.startswith("A")]
+    records = [p for p in added_res if p.endswith(".md")
+               and not re.search(r"-(correction|analysis|addendum)\.md$", p)]
+    others = [os.path.basename(p) for p in added_res
+              if p not in records and not p.endswith(".md")]
+    missing = [p for p in records
+               if not any(o.startswith(os.path.basename(p)[:-3]) for o in others)]
+    add("record-provenance", not missing,
+        "; ".join(f"no companion raw artifact in this PR: {p}" for p in missing) if missing
+        else (f"{len(records)} record(s) with companion(s)" if records
+              else "no records added"))
 
     # 3. plan: syntax gated; status moves and new rows reported only
     r = git("diff", "--name-only", f"{base_ref}...{head_ref}", "--", "docs/recomp/PLAN.md")
@@ -310,15 +417,21 @@ def main():
     md_touched = [l.split("\t")[-1] for l in diff_files.splitlines()
                   if re.search(r"tests/results/.*\.md$", l.split("\t")[-1])]
     arch_problems, arch_verified, arch_local = [], 0, 0
-    for path in added:
-        if not path.endswith(".ips"):
-            continue
-        bn = os.path.basename(path)
-        src = os.path.expanduser(f"~/Library/Logs/DiagnosticReports/{bn}")
-        if os.path.exists(src):
-            arch_local += 1
-            if sha256_bytes(open(src, "rb").read()) != sha256_bytes(git_bytes("show", f"{head_ref}:{path}")):
-                arch_problems.append(f"{bn}: sha256 mismatch vs {src}")
+    # The cited-sha256 half below ALWAYS runs. The added-*.ips comparison reads
+    # ~/Library/Logs/DiagnosticReports, which only exists on macOS; when it is
+    # absent (Windows, CI) only that half is N/A, and the reason is printed.
+    diag_dir = os.path.expanduser("~/Library/Logs/DiagnosticReports")
+    diag_available = os.path.isdir(diag_dir)
+    if diag_available:
+        for path in added:
+            if not path.endswith(".ips"):
+                continue
+            bn = os.path.basename(path)
+            src = os.path.join(diag_dir, bn)
+            if os.path.exists(src):
+                arch_local += 1
+                if sha256_bytes(open(src, "rb").read()) != sha256_bytes(git_bytes("show", f"{head_ref}:{path}")):
+                    arch_problems.append(f"{bn}: sha256 mismatch vs {src}")
     for path in md_touched:
         text = git("show", f"{head_ref}:{path}").stdout
         for m in re.finditer(r"sha256\s*`([0-9a-f]{64})`", text):
@@ -342,27 +455,35 @@ def main():
     arch_detail = "; ".join(filter(None, [
         f"{arch_verified} cited hash(es) verified" if arch_verified else "",
         f"{arch_local} .ips compared against DiagnosticReports (local)" if arch_local else "",
+        "" if diag_available else f"DiagnosticReports comparison N/A: {diag_dir} not present (macOS-only)",
     ])) or "no archival claims"
     add("archives", not arch_problems,
         "; ".join(arch_problems) if arch_problems else arch_detail)
 
-    # 5. hook executable + invariants + matrix diff
-    hook = ".claude/hooks/guard-hw-run.sh"
-    if hook in [l.split("\t")[-1] for l in diff_files.splitlines()]:
-        mode = git("ls-tree", head_ref, "--", hook).stdout.split()[0]
-        head_hook = git_bytes("show", f"{head_ref}:{hook}")
-        base_hook = git_bytes("show", f"{base_ref}:{hook}")
-        problems = [] if mode == "100755" else [f"mode {mode} (want 100755)"]
-        problems += check_hook_invariants(head_hook)
-        matrix = probe_matrix()
-        rb, rh = run_probes(base_hook, matrix), run_probes(head_hook, matrix)
-        diffs = [f"{label}: {rb[label]} -> {rh[label]}" for label in rb if rb[label] != rh[label]]
-        add("hook", not problems, "; ".join(problems) if problems else
-            "executable (100755); guard invariants hold")
-        report.append(("hook-probes", "INFO",
-                       f"{len(matrix)} cases; diffs: " + ("; ".join(diffs) if diffs else "none")))
+    # 5. hook executable + invariants + matrix diff.
+    #    macOS: exercise the bash PreToolUse hook. Windows: that hook is
+    #    bash/POSIX; report N/A with its reason (never green). The replacement's
+    #    own invariants are wired in through windows_guard_status().
+    if os.name == "nt":
+        result, detail = windows_guard_status()
+        report.append(("hook", result, detail))
     else:
-        report.append(("hook", "INFO", "unchanged"))
+        hook = GUARD_PATH_UNIX
+        if hook in [l.split("\t")[-1] for l in diff_files.splitlines()]:
+            mode = git("ls-tree", head_ref, "--", hook).stdout.split()[0]
+            head_hook = git_bytes("show", f"{head_ref}:{hook}")
+            base_hook = git_bytes("show", f"{base_ref}:{hook}")
+            problems = [] if mode == "100755" else [f"mode {mode} (want 100755)"]
+            problems += check_hook_invariants(head_hook)
+            matrix = probe_matrix()
+            rb, rh = run_probes(base_hook, matrix), run_probes(head_hook, matrix)
+            diffs = [f"{label}: {rb[label]} -> {rh[label]}" for label in rb if rb[label] != rh[label]]
+            add("hook", not problems, "; ".join(problems) if problems else
+                "executable (100755); guard invariants hold")
+            report.append(("hook-probes", "INFO",
+                           f"{len(matrix)} cases; diffs: " + ("; ".join(diffs) if diffs else "none")))
+        else:
+            report.append(("hook", "INFO", "unchanged"))
 
     # 6. header classification
     hdr = "engine/include/openscanner/obscan_api.h"
@@ -385,7 +506,7 @@ def main():
     js_files = [p for p in changed if re.match(r"^ui/.*\.js$", p)]
     if not js_files:
         report.append(("ui-js-syntax", "INFO", "no ui JS changed"))
-    elif sh(["which", "node"]).returncode != 0:
+    elif shutil.which("node") is None:
         report.append(("ui-js-syntax", "INFO", "node not found on PATH — skipped (CI covers)"))
     else:
         js_bad, js_checked = [], 0
@@ -460,7 +581,13 @@ def main():
     for name, st, detail in report:
         print(f"| {name} | {st} | {detail.replace('|', '/')} |")
     print()
-    print("Gating checks: whitespace, run-records, plan, archives, hook, ui-js-syntax, build.")
+    checks = ["whitespace", "run-records", "record-provenance", "plan", "archives",
+              "ui-js-syntax", "build"]
+    if os.name != "nt":
+        checks.insert(5, "hook")
+    print("Gating checks: " + ", ".join(checks) + ".")
+    if os.name == "nt":
+        print(f"hook: N/A here — {windows_guard_status()[1]}")
     if fails:
         print()
         print(f"**FAILED: {', '.join(fails)}**")
