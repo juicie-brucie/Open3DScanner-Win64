@@ -40,6 +40,15 @@ jobs:
             echo "main has no scripts/verify-pr.py yet - leaving verdict pending"
             exit 0
           fi
+          # Never a green gate over an empty judgement: assert the tier table
+          # before trusting it. (rc 2 = a copy that predates --selftest.)
+          # NB: capture rc *before* any negation - inside `if ! cmd`, $? is the
+          # negated status (always 0), which would skip the tier decision.
+          python3 scripts/verify-pr.py --selftest || {
+            rc=$?
+            if [ "$rc" != "2" ]; then echo "tier selftest FAILED - refusing to trust the tier"; exit "$rc"; fi
+            echo "note: verify-pr.py predates --selftest"
+          }
           tier=$(python3 scripts/verify-pr.py --tier ${{ github.event.pull_request.number }})
           if [ "$tier" != "script" ]; then
             echo "tier=$tier - a verifier verdict comment is required"

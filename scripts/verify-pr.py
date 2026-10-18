@@ -4,6 +4,7 @@
 Usage:
     scripts/verify-pr.py <pr-number> [--build] [--no-build]
     scripts/verify-pr.py --tier <pr-number>      # print: script | agent
+    scripts/verify-pr.py --selftest              # assert the tier table (CI runs this)
 
 Works on git refs (no checkout required): fetches `refs/pull/<n>/head` and the
 PR's base branch, then checks the diff. Exit 0 = all gating checks passed;
@@ -17,7 +18,8 @@ is script-gated or needs an agent verdict):
                  tests/results/** (records, logs, addenda — #21)
     script tier  everything else (PLAN.md, docs/recomp/** except the two fork
                  documents above, CLAUDE.md, README.md, ...)
-    An empty or unreadable file list is treated as agent tier.
+    An empty or unreadable file list is treated as agent tier. The list is
+    pinned by `--selftest`; edit the table and the patterns together.
 
 Gating checks
   whitespace      `git diff --check`
@@ -152,6 +154,56 @@ def is_agent_tier(path):
     return any(re.search(p, path) for p in AGENT_PATTERNS)
 
 
+# The tier list is load-bearing: a path that should be agent-tier returning
+# `script` lets auto-verdict post success and the PR merges judged by nothing.
+# This table pins the list; CI runs `--selftest` before trusting a tier
+# (verify.yml: base and PR copies; verdict-gate.yml: before the tier decision).
+# Edit the table and the patterns together — a mismatch fails the run.
+TIER_CASES = [
+    ("engine/src/ws_broadcast_server.cpp", "agent"),
+    ("engine/include/openscanner/obscan_api.h", "agent"),
+    ("tools/scan_server/main.cpp", "agent"),
+    ("mesh/src/kernel.cpp", "agent"),
+    ("ui/app.js", "agent"),
+    ("scripts/verify-pr.py", "agent"),
+    ("tests/hardware/plan56-stall-and-v5-visual.md", "agent"),
+    ("docs/recon/findings/scan-live-data.md", "agent"),
+    ("docs/architecture/scan-viewer.md", "agent"),
+    ("docs/recomp/WINDOWS-FORK.md", "agent"),
+    ("docs/recomp/FORK-COORDINATION.md", "agent"),
+    ("tests/results/2026-10-18-run.md", "agent"),
+    ("tests/results/2026-10-18-run.log", "agent"),
+    ("tests/results/2026-10-18-run.ips", "agent"),
+    ("tests/results/2026-10-18-old-addendum.md", "agent"),
+    (".github/workflows/verify.yml", "agent"),
+    (".claude/hooks/guard-hw-run.sh", "agent"),
+    ("CMakeLists.txt", "agent"),
+    ("docs/recomp/PLAN.md", "script"),
+    ("docs/recomp/ROADMAP.md", "script"),
+    ("docs/recomp/log/2026-10-18-entry.md", "script"),
+    ("CLAUDE.md", "script"),
+    ("README.md", "script"),
+    ("docs/research/plane-removal-reverse-engineering.md", "script"),
+    ("docs/tooling/rea-ghidra-setup.md", "script"),
+]
+
+
+def selftest():
+    bad = []
+    for path, want in TIER_CASES:
+        got = tier_of([path])
+        if got != want:
+            bad.append(f"{path}: want {want}, got {got}")
+    if tier_of([]) != "agent":
+        bad.append("empty list: want agent (unknown -> require a verdict)")
+    if tier_of(["docs/recomp/PLAN.md", "ui/app.js"]) != "agent":
+        bad.append("mixed list: want agent (one agent path makes the PR agent)")
+    for b in bad:
+        print("SELFTEST FAIL:", b)
+    print(f"tier selftest: {len(TIER_CASES) + 2} cases, {'FAIL' if bad else 'ok'}")
+    return 1 if bad else 0
+
+
 def sh(args, **kw):
     return subprocess.run(args, capture_output=True, text=True, **kw)
 
@@ -275,6 +327,10 @@ def main():
     build_flag = "--build" in argv
     no_build = "--no-build" in argv
     tier_mode = "--tier" in argv
+    self_test = "--selftest" in argv
+    if self_test:
+        return selftest()
+
     nums = [a for a in argv if a.isdigit()]
     if not nums:
         print(__doc__)

@@ -48,4 +48,15 @@ jobs:
             cp scripts/verify-pr.py "$RUNNER_TEMP/verify-pr.py"
             echo "origin/main has no scripts/verify-pr.py yet - using the PR copy (bootstrap)"
           fi
+          # The tier table decides script vs agent; assert it before (and in)
+          # the run. Tolerate a base/PR copy that predates --selftest (rc 2),
+          # fail on a real selftest failure.
+          selftest() {
+            python3 "$1" --selftest && return 0
+            rc=$?
+            if [ "$rc" = "2" ]; then echo "note: $1 predates --selftest"; return 0; fi
+            return "$rc"
+          }
+          selftest "$RUNNER_TEMP/verify-pr.py"
+          selftest scripts/verify-pr.py
           python3 "$RUNNER_TEMP/verify-pr.py" ${{ github.event.pull_request.number }}
