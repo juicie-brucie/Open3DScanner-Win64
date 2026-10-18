@@ -1,3 +1,7 @@
+// MSVC defines M_PI only when _USE_MATH_DEFINES is set before <math.h> is first
+// included; define it above every include so no transitive pull can beat it.
+#define _USE_MATH_DEFINES
+
 // Streams point-cloud frames over a local WebSocket so the web UI
 // (ui/index.html) can render them. Three modes:
 //
