@@ -172,35 +172,134 @@ slots to `OBScanDataManagement`, while current recon homes the data-management s
 at `scan+0xf0` on `OBScanBase` ([`findings/scan-live-data.md`](../recon/findings/scan-live-data.md) §1).
 Same object, possibly a re-homing — verify, don't assume.
 
-## Windows fork — a second workstream, captured 2026-10-18
+## Windows fork — lane roadmap, Open3DScanner-Win64 (this lane)
 
-The operator is standing up a Windows dev environment for a Windows port. The repo is
-**`Open3DScanner-Win64`** — standalone, *not* a GitHub fork relationship; the parent stays the
-pinned upstream. Charter: `docs/recomp/WINDOWS-FORK.md`; coordination:
-`docs/recomp/FORK-COORDINATION.md` — both landed.
+This section is the forward strategy for the `Open3DScanner-Win64` lane. The parent's
+viewer-family objective above (`V1` … `V5`) is the parent's lane and is not this lane's
+work. Charter: `docs/recomp/WINDOWS-FORK.md`; coordination:
+`docs/recomp/FORK-COORDINATION.md` — both landed, both seeded at repo creation. The fork is
+standalone; the parent is the pinned upstream.
 
-**The gate is a question, not a task:** does Creality ship a Windows build with the same
-`obscan_*` surface? If not, this is not a port at all — it is the Orbbec-SDK path in
-`README.md`'s "Possible future direction". Everything else waits on that answer, so **no rows
-are proposed this round**; the gate is an operator answer, not dispatchable work.
+### Gate — answered
 
-Already true, from the tree: the loader is **`#ifdef`-split** (`LoadLibraryA` /
-`GetProcAddress` / `GetLastError` vs `dlopen`) and `engine/CMakeLists.txt` has a `WIN32`
-branch — the engine is closer than it looks. Not true: `tools/` and `tests/hardware/` are
-`if(APPLE)` throughout, the hardware guardrail is a bash hook that will not fire on Windows,
-and every recon artifact is macOS arm64 — so the ABI must be recovered again, not
-reinterpreted.
+Charter open question 1 (does Creality ship a Windows build with the `obscan_*` surface?) is
+answered **yes**. See `docs/recon/findings/win64-surface.md` §gate: `CrealityScan_win_4.3.2.exe`
+carries `lib_orbbec_scan.dll` (PE32+ x86-64) exporting the full pinned macOS surface, 0
+missing, plus 36 Windows-only exports; same build 3.5.3.260921. This was the gate on
+everything; it is no longer a question, and nothing waits on it anymore.
 
-**The one rule that matters:** `obscan_api.h` is single-sourced in the parent. Platform
-differences go into it as `#ifdef`-guarded declarations with a Windows findings doc beside the
-macOS ones. A second header in a second repo is a second contract, and two contracts drift —
-the exact failure the one-home rule exists to prevent.
+### Where §8 stands (ordered; each item gates the next)
 
-**The channel already exists.** `scripts/remote-opencode.sh` (parent, PR #150) addresses a
-second machine's OpenCode server through the desktop app's server list; the Windows box is
-registered as `Windows11` and answers (OpenCode 2.0.32, verified 2026-10-18). The charter's §5
-names it as the coordination channel, and the fork's copy of the coordination file is seeded
-with its first `[win]` entry at repo-creation time.
+1. Answer OQ-1 — ✅ answered (`win64-surface.md`).
+2. Windows toolchain + CMake configure — ✅ row #101 (40/40 objects, `scan_server` linked;
+   `M_PI` fix proven by clean-directory rebuild, PR #2).
+3. Contract pin wired into CI — ✅ row #104 (`--pincheck`, PR #7). Hardening — hash the
+   committed blob, never the working file; name both values and the parent commit on failure —
+   rides with row #107 and is not yet landed.
+4. PowerShell/Python equivalent of `guard-hw-run.sh` — ✅ row #105 (PR #4; scope defect fixed
+   by #112).
+5. First Windows recon target, with its own findings doc and pins — ⏳ row #108 (enum parity,
+   PR #8 open, finding under verdict; see `docs/recon/findings/win64-enum-parity.md` on branch
+   `recon/win-enum-parity`). Windows artifact pins are still absent from
+   `FORK-COORDINATION.md` §3.
+
+### Next objective (singular)
+
+Complete charter §8 item 5 — land the first Windows recon target — before any hardware
+acceptance:
+
+- row #108: enum parity → findings doc `win64-enum-parity.md` (PR #8) + record Windows artifact
+  pins in `FORK-COORDINATION.md` §3;
+- row #107: consume the parent's current contract revision and harden `--pincheck` to hash the
+  committed blob (PR #6).
+
+Reason it is next rather than the alternatives: §8 orders item 5 last among the pre-build
+items, items 1–4 are met, and the two open PRs (#6, #8) are the only uncommitted recon/build
+work. The pin and the enum surface are what every later hardware claim will be judged against,
+so landing them first keeps later claims falsifiable.
+
+The rejected alternative — attach the scanner and run the first hardware acceptance now — is
+not dispatchable this round: the scanner is not attached (physical wall; last present 17 Oct
+13:08–13:53, Raptor Pro on VID_2BC5; needs the operator), there is no analyze/reconcile step
+to convert a first run into trusted board moves, and rows #107/#108 would leave the contract
+and enum surface unverified going into hardware. Hardware acceptance becomes the objective
+once the scanner is attached (then row #113 clears).
+
+### Sequencing (dependencies stated)
+
+1. Land #107 (contract sync → parent tip; pincheck hashes the committed blob). Needs: parent
+   tip stable; verify-pr gate green (#103, done). Drift alarm for all later work.
+2. Land #108 (enum-parity findings + Windows pins). Needs: a Ghidra import of
+   `lib_orbbec_scan.dll` (row #108 budgets hours); PR #8 under verdict. Blocks trusted enum
+   semantics for the Windows surface.
+3. Wire #110 (REA MCP registration). Needs: #103/#105 landed (done); now a config edit, not a
+   wall.
+4. Define the analyze/reconcile step (proposed row #114, below). Needs: this roadmap. Must
+   exist before the first hardware run.
+5. First Windows hardware acceptance (#113). Needs: scanner physically attached (operator);
+   backstop armed (#105); build (#101); pin (#104); reconcile step (4). Not dispatchable until
+   the scanner is attached.
+
+Charter open questions still open: OQ-2 (x64 only, or Windows-on-ARM in scope — operator);
+OQ-3 (does the `#ifdef _WIN32` loader split compile against a real DLL — builder, once an
+artifact exists; #101 compiled it, not exercised against the real DLL); OQ-4 (what replaces the
+interpose-dylib mechanism on Windows — builder/recon); OQ-5 (own agent definitions and
+worktrees — operator). OQ-1 answered (yes). §8 unmet: item 5 (this objective). Items 1–4 met.
+
+### Risks (ranked: what would make this lane produce confident wrong answers)
+
+1. **Pincheck hashes the working file, not the committed blob** (#104's stated limit, hardened
+   in #107). A stale or locally-edited header passes as pinned; the fork builds and runs
+   against a divergent contract and every downstream claim inherits the wrong ABI. Retire: land
+   the #107 hardening (hash the committed blob, name both values + parent commit on failure).
+2. **Verdict posted to the wrong repository**. `gh` defaults to `upstream`, which here is the
+   parent; a fork verdict or merge recorded against the wrong repo makes the board record
+   landings that did not happen, or block real ones. Retire: always pass `-R
+   juicie-brucie/Open3DScanner-Win64` on gh writes; record the fork remote explicitly so the
+   intent is not inferred from a remote name.
+3. **Thirteen `[inferred]` Windows-side enum gaps treated as settled** (#108 under verdict;
+   `win64-enum-parity.md` not merged). Code or behavior keyed on unconfirmed enum values gives
+   wrong message/device handling with high confidence; only the Ghidra import settles each
+   gap. Retire: land #108; do not build header `#ifdef` guards on the 13 gaps until the
+   findings doc is merged.
+4. **No Windows hardware run has ever executed** (#113). Every tag here is build or recon; a
+   first run can contradict multiple `[inferred]` claims at once. The scanner is not attached
+   now (physical wall). Retire: attach the scanner, then run; clear tags by run, not argument.
+5. **No analyze/reconcile step** (weakness #4; row #111). After a run nothing reconciles the
+   board against what actually happened, so stale statuses and wrong tags persist across
+   rounds. Retire: define reconcile before the first hardware run (proposed row #114).
+
+### Rows this plan implies (proposed; the dispatcher applies them)
+
+- #107 → DONE: land PR #6 (contract sync to parent tip + pincheck hardening).
+- #108 → DONE: land PR #8 (enum-parity findings `win64-enum-parity.md`); add Windows artifact
+  pins to `FORK-COORDINATION.md` §3.
+- #110 → DONE: wire REA MCP registration (config edit).
+- NEW #114 (analyze/reconcile step): define the Windows-lane reconcile process — compare the
+  latest `tests/results/**` record against `docs/recomp/PLAN.md` statuses/tags and
+  `docs/recon/findings/**`; propose row moves; corrections as dated addenda; one writer; tags
+  cleared by run, not argument. Feeds the analyze/reconcile half of row #111.
+- #113 → DONE (future): first Windows hardware acceptance — scanner attached, backstop armed,
+  run recorded in `tests/results/**`, then reconcile applied.
+
+### View on analyze/reconcile (#4)
+
+This lane should have an analyze/reconcile step, and it should exist **before** the first
+hardware run, not after. The first Windows hardware run is the lane's first
+`tests/results/**` record and the first time any tag could become hardware-cleared; without a
+predefined reconcile step there is no mechanism to convert that run into trusted board moves
+(clearing #108's `[inferred]` enum gaps, resolving #113, re-checking `win64-surface.md`
+conclusions against the real device). Reconcile reads the latest run record, compares it to
+the board's statuses/tags and the findings, and proposes row moves; the dispatcher applies
+them. One row, defined now, used at the first run. It does not need to run before this round's
+recon work (#107/#108 — those are static and verifier-gated), but it must be in place before
+row #113 is executed.
+
+### Superseded
+
+- ROADMAP.md rev 9's Windows-fork section ("no rows are proposed this round; the gate is an
+  operator answer"): superseded by this section. The gate is answered (`win64-surface.md`) and
+  rows #100–#113 exist. Dated 2026-10-18.
 
 ## Risks
 
