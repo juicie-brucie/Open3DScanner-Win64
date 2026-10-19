@@ -16,13 +16,19 @@ namespace {
 
 #if defined(_WIN32)
 void* OpenLibrary(const std::string& path) {
-    return reinterpret_cast<void*>(LoadLibraryA(path.c_str()));
+    // The SDK's dependencies (OrbbecSDK.dll, the VC++ runtime, OpenCV, ONNX
+    // Runtime) sit beside it. A plain LoadLibraryA with a full path does not
+    // search the DLL's own directory for those, so use the altered search
+    // path; no PATH or SetDllDirectory change.
+    return reinterpret_cast<void*>(
+        LoadLibraryExA(path.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH));
 }
 void* ResolveSymbol(void* handle, const char* name) {
     return reinterpret_cast<void*>(GetProcAddress(reinterpret_cast<HMODULE>(handle), name));
 }
-std::string LastErrorMessage() {
-    return "LoadLibrary/GetProcAddress failed (GetLastError=" + std::to_string(GetLastError()) + ")";
+std::string LastErrorMessage(const std::string& path) {
+    return "LoadLibraryExA('" + path + "') failed (GetLastError=" +
+           std::to_string(GetLastError()) + ")";
 }
 #else
 void* OpenLibrary(const std::string& path) {
@@ -51,7 +57,11 @@ bool PathExists(const std::string& path) {
 ObscanLibrary::ObscanLibrary(const std::string& library_path) {
     handle_ = OpenLibrary(library_path);
     if (handle_ == nullptr) {
+#if defined(_WIN32)
+        throw ObscanLoadError("Failed to load OBScan SDK library: " + LastErrorMessage(library_path));
+#else
         throw ObscanLoadError("Failed to load OBScan SDK library at '" + library_path + "': " + LastErrorMessage());
+#endif
     }
 
     auto resolve = [this](const char* name) -> void* {
