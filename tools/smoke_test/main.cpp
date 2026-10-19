@@ -19,10 +19,19 @@
 //
 // Usage:
 //   smoke_test [path-to-liborbbec_scan.dylib-or-lib_orbbec_scan.dll]
+//
+// Exit codes: 0 clean run, 1 other launch failure, 2 skipped (no dylib —
+// matches the hardware room's rule 10), 3 recovered from the known
+// obscan_context_destroy() vendor crash.
+//
+// The device-count probe is deliberately fixed (7 samples x 500 ms); a
+// deterministic series is worth more to a record than a tunable knob.
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "openscanner/obscan_loader.h"
@@ -76,10 +85,24 @@ int RunSdkSession(const std::string& library_path) {
     std::printf("[worker] obscan_context_get_device_management() -> %s\n", StatusName(status));
 
     if (status == OB_SCAN_SUCCESS) {
+        // Delayed, repeated probe: the vendor's watcher completes detection
+        // ~1 s after a single poll, so one sample raced it (OQ-7b). Keep the
+        // listener-free shape — that is the point of this tool.
+        constexpr int kDeviceProbeSamples = 7;
+        constexpr int kDeviceProbeIntervalMs = 500;
         int32_t device_num = 0;
-        status = lib.obscan_device_management_get_device_num(device_mgmt, &device_num);
-        std::printf("[worker] obscan_device_management_get_device_num() -> %s, count=%d\n", StatusName(status),
-                    device_num);
+        for (int sample = 0; sample < kDeviceProbeSamples; ++sample) {
+            int32_t observed = 0;
+            status = lib.obscan_device_management_get_device_num(device_mgmt, &observed);
+            std::printf("[worker] get_device_num sample %d/%d after %dms -> %s, count=%d\n",
+                        sample + 1, kDeviceProbeSamples, sample * kDeviceProbeIntervalMs,
+                        StatusName(status), observed);
+            std::fflush(stdout);
+            device_num = observed;
+            if (sample + 1 < kDeviceProbeSamples) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(kDeviceProbeIntervalMs));
+            }
+        }
 
         // obscan_device_management_get_device_info has never been seen to
         // succeed on hardware (no log in logs/ shows it), and the same call
@@ -139,7 +162,8 @@ int main(int argc, char** argv) {
         std::fprintf(stderr,
                       "No OBScan SDK library found. Pass the path to liborbbec_scan.dylib / "
                       "lib_orbbec_scan.dll explicitly (from an existing CrealityScan install).\n");
-        return 1;
+        std::printf("[launcher] Exit code 2 = skipped (no dylib).\n");
+        return 2;
     }
 
     std::printf("[launcher] Running SDK session in a worker process...\n");
@@ -159,7 +183,8 @@ int main(int argc, char** argv) {
         "(see README.md \"Known issues\") — the launcher process is unaffected and is exiting "
         "cleanly instead of propagating the crash.\n",
         crash_reason.c_str());
-    // Exit code 2 distinguishes "recovered from a known vendor crash" from
-    // a true clean run (0), without the launcher itself ever crashing.
-    return 2;
+    std::printf("[launcher] Exit code 3 = recovered from known vendor crash.\n");
+    // Exit code 3 (not 2): 2 is the hardware room's rule-10 "skipped, no
+    // dylib", and a record reader must be able to tell the two apart.
+    return 3;
 }

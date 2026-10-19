@@ -5,12 +5,24 @@
 // Streams point-cloud frames over a local WebSocket so the web UI
 // (ui/index.html) can render them. Three modes:
 //
-//   scan_server [port]
+//   scan_server [port]   (or: scan_server --synthetic [port])
 //       Synthetic, animated sphere — exists so the UI's render/latency
 //       pipeline can be built and measured without a physical scanner.
 //
+//   Per-tick latency instrumentation (row #111; measurement only) is on by
+//   default and prints a `[perf] window` line every 5 s plus a summary at
+//   teardown. Set OPENSCANNER_TICK_PERF=0 to disable it.
+//
 //   scan_server --live [port] [path] [seconds] [--record <file>]
 //       Drives a real OBScan session; --record writes V1 frames to <file>.
+//       Plane removal (findings plane-removal.md §3), env-driven:
+//         OPENSCANNER_PLANE_REMOVE=1            auto plane removal on
+//         OPENSCANNER_TURNTABLE_PLANE_REMOVE=1  turntable plane removal on
+//         OPENSCANNER_MANUAL_PLANE=a,b,c,d      manual plane for the SDK
+//       Our own removal decision (row #77), independent of the toggles:
+//         OPENSCANNER_OUR_PLANE_REMOVE=1        fit a plane, cut below it
+//         OPENSCANNER_PLANE_MARGIN=<float>      keep signed distance >= margin
+//                                               (default 1% of cloud radius)
 //
 //   scan_server --replay <file> [port]
 //       Replays a recorded session (V1 frames) without a device.
@@ -34,20 +46,34 @@
 #include <chrono>
 #include <cmath>
 #include <csignal>
+#include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fcntl.h>
 #include <functional>
 #include <fstream>
 #include <iterator>
+#include <limits.h>
 #include <memory>
 #include <string>
 #include <thread>
 #include <vector>
 
+#if defined(_WIN32)
+#include <fcntl.h>
+#include <io.h>
+#include <process.h>
+#include <windows.h>
+#else
+#include <sys/time.h>
+#include <unistd.h>
+#endif
+
 #if defined(__APPLE__)
 #include <CoreFoundation/CoreFoundation.h>
+#include <mach-o/dyld.h>
 #endif
 
 #include "openscanner/capture_source.h"
@@ -55,10 +81,257 @@
 #include "openscanner/obscan_loader.h"
 #include "openscanner/ws_broadcast_server.h"
 #include "openscanner/worker_process.h"
+#include "tracking_status.h"  // the vendor's per-frame verdict, by pinned name (row #91)
+#include "bounded_watchdog.h"  // the per-call bound that survives a stuck caller (row #89)
+#include "perf_window.h"       // per-tick latency instrumentation (row #111)
 
 namespace {
 
+namespace perf = openscanner::perf;  // row #111 tick instrumentation
+
+// Quit-path instrumentation (row #79): append-only trace shared with the
+// app. A raw write to a pre-opened fd (no stdout FILE, no allocator) so a
+// diagnostic cannot be swallowed by a lock the hung vendor teardown thread is
+// holding. Windows uses the _open/_write CRT equivalents.
+#if defined(_WIN32)
+#define OSC_OPEN _open
+#define OSC_WRITE _write
+#define OSC_GETPID _getpid
+#define OSC_OPEN_FLAGS (_O_WRONLY | _O_CREAT | _O_APPEND)
+#else
+#define OSC_OPEN open
+#define OSC_WRITE write
+#define OSC_GETPID getpid
+#define OSC_OPEN_FLAGS (O_WRONLY | O_CREAT | O_APPEND)
+#endif
+
+int g_quit_log_fd = -1;
+
+void QuitTimestamp(long* sec, int* usec) {
+#if defined(_WIN32)
+    FILETIME ft;
+    GetSystemTimeAsFileTime(&ft);
+    ULARGE_INTEGER u;
+    u.LowPart = ft.dwLowDateTime;
+    u.HighPart = ft.dwHighDateTime;
+    const unsigned long long us = (u.QuadPart - 116444736000000000ULL) / 10ULL;
+    *sec = static_cast<long>(us / 1000000ULL);
+    *usec = static_cast<int>(us % 1000000ULL);
+#else
+    struct timeval tv = {};
+    gettimeofday(&tv, nullptr);
+    *sec = static_cast<long>(tv.tv_sec);
+    *usec = static_cast<int>(tv.tv_usec);
+#endif
+}
+
+void QuitTraceInit() {
+    if (g_quit_log_fd >= 0) return;
+    const char* path = std::getenv("OPENSCANNER_QUIT_LOG");
+#if defined(_WIN32)
+    std::string win_default;
+    if (path == nullptr || path[0] == '\0') {
+        const char* temp = std::getenv("TEMP");
+        win_default = (temp != nullptr && temp[0] != '\0') ? std::string(temp) + "\\openscanner-quit.log"
+                                                           : std::string("openscanner-quit.log");
+        path = win_default.c_str();
+    }
+#else
+    if (path == nullptr || path[0] == '\0') path = "/tmp/openscanner-quit.log";
+#endif
+    g_quit_log_fd = OSC_OPEN(path, OSC_OPEN_FLAGS, 0644);
+}
+void QuitTrace(const char* msg) {
+    if (g_quit_log_fd < 0) return;
+    long sec = 0;
+    int usec = 0;
+    QuitTimestamp(&sec, &usec);
+    char buf[256];
+    int n = std::snprintf(buf, sizeof(buf), "%ld.%06d [worker pid %d] %s\n", sec, usec,
+                          static_cast<int>(OSC_GETPID()), msg);
+    if (n > 0) {
+        long ignored = static_cast<long>(OSC_WRITE(g_quit_log_fd, buf, static_cast<unsigned int>(n)));
+        (void)ignored;
+    }
+}
+
+// The formatted sibling of QuitTrace. Same raw-write path — no stdout FILE, no
+// allocator — so a diagnostic printed here cannot be swallowed by a lock the
+// hung vendor teardown thread is holding (row #89). Keep messages short.
+void QuitTracef(const char* fmt, ...) {
+    if (g_quit_log_fd < 0) return;
+    long sec = 0;
+    int usec = 0;
+    QuitTimestamp(&sec, &usec);
+    char buf[256];
+    int n = std::snprintf(buf, sizeof(buf), "%ld.%06d [worker pid %d] ", sec, usec,
+                          static_cast<int>(OSC_GETPID()));
+    if (n < 0 || n >= static_cast<int>(sizeof(buf))) return;
+    va_list ap;
+    va_start(ap, fmt);
+    int m = std::vsnprintf(buf + n, sizeof(buf) - static_cast<size_t>(n), fmt, ap);
+    va_end(ap);
+    if (m < 0) return;
+    size_t used = static_cast<size_t>(n) + std::min(static_cast<size_t>(m), sizeof(buf) - static_cast<size_t>(n) - 1);
+    if (used >= sizeof(buf) - 1) used = sizeof(buf) - 2;  // make room for the newline
+    buf[used++] = '\n';
+    long ignored = static_cast<long>(OSC_WRITE(g_quit_log_fd, buf, static_cast<unsigned int>(used)));
+    (void)ignored;
+}
+
+// Our own removal decision (row #77): fit a dominant plane from the live
+// cloud (deterministic RANSAC) and cut points below a margin. This is the
+// decision layer only — it runs on whatever cloud the vendor path published,
+// so it composes with (or replaces) the #71 toggle-bound vendor removal.
+std::atomic<uint64_t> g_our_plane_cut{0};
+std::atomic<uint64_t> g_our_plane_kept{0};
+std::atomic<uint64_t> g_our_plane_fits{0};
+
+double view_radius_guess(const ObScanPoint* pts, uint32_t n) {
+    if (n == 0) return 0.0;
+    double sx = 0, sy = 0, sz = 0;
+    for (uint32_t i = 0; i < n; ++i) { sx += pts[i].x; sy += pts[i].y; sz += pts[i].z; }
+    double cx = sx / n, cy = sy / n, cz = sz / n;
+    double sum = 0;
+    for (uint32_t i = 0; i < n; ++i) {
+        double dx = pts[i].x - cx, dy = pts[i].y - cy, dz = pts[i].z - cz;
+        sum += dx * dx + dy * dy + dz * dz;
+    }
+    return std::sqrt(sum / n);
+}
+
+struct OurPlane {
+    double a = 0, b = 0, c = 0, d = 0;
+    bool valid = false;
+    uint32_t inliers = 0;
+};
+
+// Canonicalize the normal's sign so "below the plane" has one meaning per
+// run: the positive side is the scanner (or +z when no pose is available).
+OurPlane FitDominantPlane(const ObScanPoint* pts, uint32_t n, int iterations, double inlier_dist, double ref_x,
+                          double ref_y, double ref_z, bool have_ref) {
+    OurPlane best;
+    if (n < 3) return best;
+    uint64_t seed = 0x9e3779b97f4a7c15ULL;
+    auto rnd = [&seed](uint32_t m) {
+        seed = seed * 6364136223846793005ULL + 1442695040888963407ULL;
+        return static_cast<uint32_t>((seed >> 33) % m);
+    };
+    for (int it = 0; it < iterations; ++it) {
+        uint32_t i = rnd(n), j = rnd(n), k = rnd(n);
+        if (i == j || j == k || i == k) continue;
+        const ObScanPoint& p0 = pts[i];
+        const ObScanPoint& p1 = pts[j];
+        const ObScanPoint& p2 = pts[k];
+        double ux = p1.x - p0.x, uy = p1.y - p0.y, uz = p1.z - p0.z;
+        double vx = p2.x - p0.x, vy = p2.y - p0.y, vz = p2.z - p0.z;
+        double a = uy * vz - uz * vy;
+        double b = uz * vx - ux * vz;
+        double c = ux * vy - uy * vx;
+        double norm = std::sqrt(a * a + b * b + c * c);
+        if (norm < 1e-9) continue;
+        a /= norm; b /= norm; c /= norm;
+        double d = -(a * p0.x + b * p0.y + c * p0.z);
+        uint32_t inliers = 0;
+        for (uint32_t t = 0; t < n; ++t) {
+            double dist = std::fabs(a * pts[t].x + b * pts[t].y + c * pts[t].z + d);
+            if (dist <= inlier_dist) ++inliers;
+        }
+        if (inliers > best.inliers) {
+            best = {a, b, c, d, true, inliers};
+        }
+    }
+    if (best.valid) {
+        double side = have_ref ? (best.a * ref_x + best.b * ref_y + best.c * ref_z + best.d) : best.c;
+        if (side < 0) {
+            best.a = -best.a;
+            best.b = -best.b;
+            best.c = -best.c;
+            best.d = -best.d;
+        }
+    }
+    return best;
+}
+
+// Directory containing the running binary (with trailing separator), or "".
+std::string ExecutableDir() {
+#if defined(_WIN32)
+    char buf[MAX_PATH];
+    DWORD n = GetModuleFileNameA(nullptr, buf, MAX_PATH);
+    if (n == 0 || n == MAX_PATH) return "";
+    std::string p(buf);
+    size_t slash = p.find_last_of("\\/");
+    return slash == std::string::npos ? std::string() : p.substr(0, slash + 1);
+#elif defined(__APPLE__)
+    char buf[PATH_MAX];
+    uint32_t size = sizeof(buf);
+    if (_NSGetExecutablePath(buf, &size) != 0) return "";
+    char resolved[PATH_MAX];
+    if (realpath(buf, resolved) == nullptr) return "";
+    std::string p(resolved);
+#else
+    char buf[PATH_MAX];
+    ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (n <= 0) return "";
+    buf[n] = '\0';
+    std::string p(buf);
+#endif
+#if !defined(_WIN32)
+    size_t slash = p.find_last_of('/');
+    return slash == std::string::npos ? std::string() : p.substr(0, slash + 1);
+#endif
+}
+
+// UI directory served on the same port as the WebSocket. Resolved relative
+// to the running binary first (a bundled .app's cwd is "/"), then the cwd
+// for dev-tree runs. Returns "" if none is found (caller warns loudly).
+std::string FindUiDir() {
+    std::vector<std::string> candidates;
+    std::string exe = ExecutableDir();
+    if (!exe.empty()) {
+        candidates.push_back(exe + "ui");                    // exe dir has ui/
+        candidates.push_back(exe + "../Resources/ui");       // .app: MacOS -> Resources/ui
+        candidates.push_back(exe + "../../../ui");           // build/tools/scan_server -> repo/ui
+    }
+    candidates.push_back("ui");
+    candidates.push_back("../ui");
+    candidates.push_back("../../ui");
+    for (const std::string& c : candidates) {
+        std::string index = c + "/index.html";
+        if (FILE* f = std::fopen(index.c_str(), "rb")) {
+            std::fclose(f);
+            return c;
+        }
+    }
+    return "";
+}
+
+// Loud at startup rather than a silent 404 per request: a missing ui/
+// means the page cannot load, and the app's retry sees 404 as success.
+void ConfigureStatic(openscanner::WsBroadcastServer& server) {
+    std::string ui = FindUiDir();
+    if (ui.empty()) {
+        std::fprintf(stderr,
+                     "[worker] WARNING: ui/ directory not found (checked next to the binary and cwd); "
+                     "static serving disabled — the page will 404.\n");
+    } else {
+        std::printf("[worker] Serving UI from: %s\n", ui.c_str());
+    }
+    server.SetStaticRoot(ui);
+}
+
 std::string g_record_path;
+std::atomic<bool> g_context_destroy_timed_out{false};
+// Exit code for the context_destroy deadline, distinct from the room's
+// rule-10 "skipped, no dylib" exit 2 and from the worker's "no device" 2.
+constexpr int kExitContextDestroyTimeout = 4;
+// Row #89: the per-call bound around obscan_context_destroy(). It is a file
+// scope constant because a watchdog thread must enforce it independently of
+// the thread that made the call.
+constexpr int kContextDestroyCallTimeoutMs = 5000;
+// The watchdog's grace past the bound: a little slack so the caller's own
+// timeout path (which disarms the watchdog) wins the race and exits cleanly.
+constexpr int kContextDestroyWatchdogGraceMs = 500;
 uint64_t g_recorded_frame_count = 0;
 constexpr int kPointGridSize = 48;        // kPointGridSize^2 points on a sphere.
 constexpr double kFrameIntervalMs = 1000.0 / 30.0;  // ~30 Hz.
@@ -187,6 +460,17 @@ constexpr int kExposureMin = 1;
 constexpr int kExposureMax = 1000;
 constexpr int kDefaultExposure = 900;  // Matches the value this file already drove live scans with.
 
+// Last per-frame tracking status (findings scan-quality-gate.md §2), surfaced
+// in the status JSON so a consumer can show the vendor's per-pose verdict.
+// The value is the SDK's own — see findings tracking-mechanism.md §1 for what
+// it carries. -1 means no FRAME_READY sample has been seen yet.
+std::atomic<int> g_last_tracking_status{-1};
+// The per-reason tally across the poses seen so far, surfaced alongside the
+// last status so the UI can show the accumulated rejection reasons (row #91).
+// One slot per declared ObScanTrackingStatus value (index = status value).
+std::atomic<uint64_t> g_tracking_samples{0};
+std::atomic<uint64_t> g_tracking_hist[16];
+
 // Shared between the WS reader thread(s) (writer, via HandleControlMessage)
 // and whichever thread owns the scan loop (reader, via its tick) — hence
 // all-atomic, no locking. Mirrors the synthetic/live scan lifecycle: a
@@ -262,6 +546,13 @@ std::string BuildStatusJson(const char* mode, const ControlState& state, bool fo
     json += state.fov_wide.load() ? "wide" : "normal";
     json += "\",\"fovControllable\":";
     json += fov_controllable ? "true" : "false";
+    json += openscanner::tracking::TrackingStatusJsonTail(g_last_tracking_status.load());
+    uint64_t tracking_counts[openscanner::tracking::kTrackingStatusCount];
+    for (int32_t i = 0; i < openscanner::tracking::kTrackingStatusCount; ++i) {
+        tracking_counts[i] = g_tracking_hist[i].load();
+    }
+    json += openscanner::tracking::TrackingCountsJsonTail(tracking_counts,
+                                                          openscanner::tracking::kTrackingStatusCount);
     json += "}";
     return json;
 }
@@ -314,6 +605,7 @@ static void RecordFrame(const std::vector<uint8_t>& frame) {
 
 void RunSyntheticServer(uint16_t port) {
     openscanner::WsBroadcastServer server;
+    ConfigureStatic(server);
     ControlState control;
     control.scanning = true;  // Streams immediately, as before, if no UI ever sends a command.
 
@@ -336,9 +628,17 @@ void RunSyntheticServer(uint16_t port) {
     uint32_t frame_id = 0;
     double angle = 0.0;
     double last_status_broadcast_ms = 0.0;
+    // Row #111: the same per-tick instrumentation as the live loop, so the
+    // baseline runnable without a device reports it too. Pose/getter are N/A.
+    perf::TickPerf tick_perf;
+    if (!tick_perf.enabled()) std::printf("[perf] per-tick timing disabled by OPENSCANNER_TICK_PERF=0\n");
 
     while (true) {
         auto tick_start = std::chrono::steady_clock::now();
+        tick_perf.BeginTick();
+        int64_t s_post_us = 0, s_bcast_us = 0;
+        uint32_t frame_points_count = 0;
+        uint64_t frame_bytes = 0;
 
         if (control.finish_requested.exchange(false)) {
             // "Finish" resets the demo back to a fresh idle sphere, ready
@@ -350,23 +650,37 @@ void RunSyntheticServer(uint16_t port) {
 
         double now_ms = NowMs();
         if (now_ms - last_status_broadcast_ms >= 1000.0) {
-            server.BroadcastText(BuildStatusJson("synthetic", control, /*fov_controllable=*/true));
+            std::string status_json = BuildStatusJson("synthetic", control, /*fov_controllable=*/true);
+            {
+                perf::SegTimer t(&s_bcast_us);
+                server.BroadcastText(status_json);
+            }
+            frame_bytes += status_json.size();
             last_status_broadcast_ms = now_ms;
         }
 
         if (control.scanning.load() && !control.paused.load()) {
-            std::vector<Vec3> frame_points = base_points;
-            RotateY(&frame_points, angle);
-            angle += 0.02;
-
-            std::vector<uint8_t> buf =
-                BuildFrame(frame_id++, now_ms, reinterpret_cast<const float*>(frame_points.data()),
-                           static_cast<uint32_t>(frame_points.size()));
-            if (server.ConnectedClientCount() > 0) {
-                server.BroadcastBinary(buf.data(), buf.size());
-            RecordFrame(buf);
+            std::vector<uint8_t> buf;
+            {
+                perf::SegTimer t(&s_post_us);
+                std::vector<Vec3> frame_points = base_points;
+                RotateY(&frame_points, angle);
+                angle += 0.02;
+                frame_points_count = static_cast<uint32_t>(frame_points.size());
+                buf = BuildFrame(frame_id++, now_ms, reinterpret_cast<const float*>(frame_points.data()),
+                                 frame_points_count);
             }
+            {
+                perf::SegTimer t(&s_bcast_us);
+                if (server.ConnectedClientCount() > 0) {
+                    server.BroadcastBinary(buf.data(), buf.size());
+                }
+            }
+            frame_bytes += buf.size();
+            RecordFrame(buf);
         }
+
+        tick_perf.EndTick(0, 0, s_post_us, s_bcast_us, frame_points_count, frame_bytes);
 
         auto elapsed = std::chrono::steady_clock::now() - tick_start;
         auto sleep_for = std::chrono::milliseconds(static_cast<int64_t>(kFrameIntervalMs)) -
@@ -404,6 +718,12 @@ std::atomic<bool> g_got_connect_message{false};
 std::atomic<int> g_frame_ready_count{0};
 std::atomic<uint64_t> g_cloud_frames_broadcast{0};
 std::atomic<uint64_t> g_full_detail_chunks_broadcast{0};
+// Per-frame tracking status: the getter is exported and the numeric mapping
+// is pinned (findings scan-quality-gate.md §2 / row #78), so samples are
+// recorded and rendered by name (tracking_status.h). See row #92 for the
+// comment this replaces.
+fn_obscan_frame_get_frame_tracking_status g_frame_tracking_status_fn = nullptr;
+fn_obscan_frame_release g_frame_release_fn = nullptr;
 
 // Set by a SIGINT/SIGTERM handler so Ctrl+C (or a plain `kill`/pkill, which
 // sends SIGTERM by default) breaks out of the streaming loop into the
@@ -417,6 +737,7 @@ volatile std::sig_atomic_t g_stop_requested = 0;
 
 void OnStopSignal(int) {
     g_stop_requested = 1;
+    QuitTrace("signal handler entered (g_stop_requested set)");
 }
 
 void OnDeviceMessage(ObScanDeviceMessage msg) {
@@ -464,6 +785,18 @@ void OnDataMessage(ObScanDataMessage msg) {
     std::fflush(stdout);
     if (msg.msg_id == OB_SCAN_MESSAGE_ID_FRAME_READY) {
         ++g_frame_ready_count;
+        if (g_frame_tracking_status_fn != nullptr && msg.data != nullptr) {
+            int32_t tracking = -1;
+            if (g_frame_tracking_status_fn(msg.data, &tracking) == OB_SCAN_SUCCESS) {
+                g_last_tracking_status.store(tracking);
+                g_tracking_samples.fetch_add(1);
+                if (tracking >= 0 && tracking < 16) g_tracking_hist[tracking].fetch_add(1);
+                std::printf("[worker][data] FRAME_READY tracking_status=%d (%s)\n", tracking,
+                            openscanner::tracking::TrackingStatusName(tracking));
+                std::fflush(stdout);
+            }
+            if (g_frame_release_fn != nullptr) g_frame_release_fn(msg.data);
+        }
     }
 }
 
@@ -589,6 +922,8 @@ void Report(const char* step, ObScanStatus status) {
 
 int RunLiveServer(const std::string& library_path, uint16_t port, const std::string& record_path = "") {
     g_record_path = record_path;
+    QuitTraceInit();
+    QuitTrace("RunLiveServer: installing signal handlers");
     std::signal(SIGINT, &OnStopSignal);
     std::signal(SIGTERM, &OnStopSignal);
 #if defined(SIGPIPE)
@@ -603,6 +938,8 @@ int RunLiveServer(const std::string& library_path, uint16_t port, const std::str
     std::fflush(stdout);
 
     openscanner::ObscanLibrary lib(library_path);
+    g_frame_tracking_status_fn = lib.obscan_frame_get_frame_tracking_status;
+    g_frame_release_fn = lib.obscan_frame_release;
 
     std::string algo_dir = openscanner::ObscanLibrary::FindStreamingAssetsDirForLibraryPath(library_path);
     ObScanContextConfig context_config = {};
@@ -705,6 +1042,49 @@ int RunLiveServer(const std::string& library_path, uint16_t port, const std::str
     Report("obscan_scan_start", status);
     if (status != OB_SCAN_SUCCESS) return 1;
 
+    // Plane-removal bind (findings plane-removal.md §3): the three toggles
+    // are live-callable and gate-free, so enabling them is lawful at any
+    // step. The vendor's own per-frame executor then does the work; the
+    // effect is only observable through the cloud getters (compare point
+    // counts). Env-driven surface (inherited by the worker):
+    // OPENSCANNER_PLANE_REMOVE=1, OPENSCANNER_TURNTABLE_PLANE_REMOVE=1,
+    // OPENSCANNER_MANUAL_PLANE="a,b,c,d".
+    //
+    // Persistence is unconfirmed: whether the toggles survive a pause is
+    // not stated in the findings, so re-assert them after every successful
+    // resume rather than assuming they persist. Re-calling is lawful
+    // (gate-free), and the log shows each re-assert.
+    auto apply_plane_config = [&lib, scan]() {
+        if (const char* pr = std::getenv("OPENSCANNER_PLANE_REMOVE");
+            pr != nullptr && std::string(pr) == "1") {
+            Report("obscan_scan_plane_remove(true)", lib.obscan_scan_plane_remove(scan, true));
+        }
+        if (const char* tpr = std::getenv("OPENSCANNER_TURNTABLE_PLANE_REMOVE");
+            tpr != nullptr && std::string(tpr) == "1") {
+            Report("obscan_scan_turntable_plane_remove(true)",
+                   lib.obscan_scan_turntable_plane_remove(scan, true));
+        }
+        if (const char* mp = std::getenv("OPENSCANNER_MANUAL_PLANE"); mp != nullptr && mp[0] != '\0') {
+            float a = 0, b = 0, c = 0, d = 0;
+            if (std::sscanf(mp, "%f,%f,%f,%f", &a, &b, &c, &d) == 4) {
+                // Setter's layout: {int state, bool enabled, pad, plane}
+                // (findings §4); state==2 is the native's observed int read.
+                ObScanManualRPConfig cfg = {};
+                cfg.state = 2;
+                cfg.enabled = true;
+                cfg.plane.a = a;
+                cfg.plane.b = b;
+                cfg.plane.c = c;
+                cfg.plane.d = d;
+                Report("obscan_scan_config_manaul_remove_plane(a,b,c,d)",
+                       lib.obscan_scan_config_manaul_remove_plane(scan, &cfg));
+            } else {
+                std::fprintf(stderr, "[worker] OPENSCANNER_MANUAL_PLANE must be \"a,b,c,d\"\n");
+            }
+        }
+    };
+    apply_plane_config();
+
     ControlState control;
     control.scanning = true;  // obscan_scan_start above has already run.
     control.auto_exposure = false;  // Matches the unconditional 900 re-assert this loop already did.
@@ -712,6 +1092,7 @@ int RunLiveServer(const std::string& library_path, uint16_t port, const std::str
     control.fov_wide = (scan_config.mode_config.scan_fov == OB_SCAN_FOV_WIDE);
 
     openscanner::WsBroadcastServer server;
+    ConfigureStatic(server);
     server.SetTextMessageHandler([&control, &server](const std::string& msg) {
         HandleControlMessage(msg, &control);
         if (control.finish_requested.load()) g_stop_requested = 1;
@@ -735,6 +1116,9 @@ int RunLiveServer(const std::string& library_path, uint16_t port, const std::str
 
     uint32_t frame_id = 0;
     const int total_ticks = (g_live_session_seconds * 1000) / kLiveTickIntervalMs;
+    // Row #111: measurement only — the cadence and call order below are unchanged.
+    perf::TickPerf tick_perf;
+    if (!tick_perf.enabled()) std::printf("[perf] per-tick timing disabled by OPENSCANNER_TICK_PERF=0\n");
     uint32_t max_points_seen = 0;
     bool hardware_paused = false;
     // Separate from hardware_paused: records what we last *attempted*
@@ -745,8 +1129,27 @@ int RunLiveServer(const std::string& library_path, uint16_t port, const std::str
     // sequence. Pausing again (or clicking Start again) is still a fresh,
     // deliberate single attempt.
     bool last_requested_paused = false;
+#if !defined(_WIN32)
+    // Orphan guard: if the supervising app dies without sending SIGTERM,
+    // the worker is reparented (ppid changes); tear down gracefully rather
+    // than lingering as a second SDK user.
+    const pid_t original_parent = getppid();
+#endif
     for (int tick = 0; tick < total_ticks; ++tick) {
+        tick_perf.BeginTick();
+        int64_t s_pose_us = 0, s_getter_us = 0, s_post_us = 0, s_bcast_us = 0;
+        uint32_t frame_points = 0;
+        uint64_t frame_bytes = 0;
+#if !defined(_WIN32)
+        if (getppid() != original_parent) {
+            QuitTrace("orphan guard: parent changed -> stop requested");
+            std::printf("[worker] parent exited — stopping and tearing down cleanly.\n");
+            std::fflush(stdout);
+            g_stop_requested = 1;
+        }
+#endif
         if (g_stop_requested) {
+            QuitTrace("live loop observed stop request -> breaking to teardown");
             std::printf(
                 "[worker] Stop requested (Ctrl+C or UI \"finish\") — ending the live loop and tearing down "
                 "cleanly.\n");
@@ -771,7 +1174,10 @@ int RunLiveServer(const std::string& library_path, uint16_t port, const std::str
             ObScanStatus toggle_status = want_paused ? lib.obscan_scan_pause(scan) : lib.obscan_scan_start(scan);
             Report(want_paused ? "obscan_scan_pause (control)" : "obscan_scan_start (resume, control)",
                    toggle_status);
-            if (toggle_status == OB_SCAN_SUCCESS) hardware_paused = want_paused;
+            if (toggle_status == OB_SCAN_SUCCESS) {
+                hardware_paused = want_paused;
+                if (!want_paused) apply_plane_config();  // toggles may not survive pause
+            }
         }
 
         ObScanPointColorClouds cloud = {};
@@ -791,13 +1197,31 @@ int RunLiveServer(const std::string& library_path, uint16_t port, const std::str
             // follows the scanner during a scan (the global pose only updates
             // when a registration result is confirmed). Broadcast it as a
             // pose message so the page can follow the scanner POV.
+            bool have_scanner_pose = false;
+            double scanner_x = 0, scanner_y = 0, scanner_z = 0;
             {
                 ObScanPose pose = {};
-                ObScanStatus pose_status = lib.obscan_scan_get_registration_pose(scan, &pose);
+                ObScanStatus pose_status;
+                {
+                    perf::SegTimer t(&s_pose_us);
+                    pose_status = lib.obscan_scan_get_registration_pose(scan, &pose);
+                }
                 if (pose_status == OB_SCAN_SUCCESS) {
-                    std::vector<uint8_t> pbuf = openscanner::frame_protocol::encode_pose(
-                        frame_id++, NowMs(), NowMs(), &pose.m[0][0]);
-                    server.BroadcastBinary(pbuf.data(), pbuf.size());
+                    have_scanner_pose = true;
+                    scanner_x = pose.m[0][3];
+                    scanner_y = pose.m[1][3];
+                    scanner_z = pose.m[2][3];
+                    std::vector<uint8_t> pbuf;
+                    {
+                        perf::SegTimer t(&s_post_us);
+                        pbuf = openscanner::frame_protocol::encode_pose(
+                            frame_id++, NowMs(), NowMs(), &pose.m[0][0]);
+                    }
+                    {
+                        perf::SegTimer t(&s_bcast_us);
+                        server.BroadcastBinary(pbuf.data(), pbuf.size());
+                    }
+                    frame_bytes += pbuf.size();
                     RecordFrame(pbuf);
                 }
             }
@@ -808,35 +1232,100 @@ int RunLiveServer(const std::string& library_path, uint16_t port, const std::str
             // the UI finally see live points while scanning.
             // out_count is not validated by the wrapper, so pass a valid
             // pointer; out_bbox is required non-null.
-            status = lib.obscan_scan_get_model_point_color_clouds(scan, &cloud, &bbox, &published_count);
+            {
+                perf::SegTimer t(&s_getter_us);
+                status = lib.obscan_scan_get_model_point_color_clouds(scan, &cloud, &bbox, &published_count);
+            }
             if (status == OB_SCAN_SUCCESS) {
                 max_points_seen = std::max(max_points_seen, cloud.num_points);
                 if (cloud.num_points > 0 && cloud.points != nullptr) {
-                    // Bound the per-tick cost: broadcast a fixed-size sample
-                    // instead of copying/broadcasting the whole accumulated
-                    // cloud every tick (O(points) -> O(kLiveBroadcastPointBudget)).
+                    perf::SegTimer post_timer(&s_post_us);
+                    // Our own decision layer (row #77): fit a dominant plane
+                    // from a bounded sample and cut below it. Fitting and
+                    // filtering both stay O(budget), like the #32 broadcast.
                     constexpr uint32_t kLiveBroadcastPointBudget = 20000;
+                    bool use_plane = false;
+                    OurPlane plane;
+                    // Margin semantics: keep points with signed distance >= margin;
+                    // cut the half-space strictly below the plane. The normal is
+                    // oriented toward the scanner, so the object side is positive.
+                    double margin = 0.0;
+                    const char* our_env = std::getenv("OPENSCANNER_OUR_PLANE_REMOVE");
+                    if (our_env != nullptr && std::string(our_env) == "1") {
+                        const char* margin_env = std::getenv("OPENSCANNER_PLANE_MARGIN");
+                        bool margin_given = false;
+                        if (margin_env != nullptr && margin_env[0] != '\0') {
+                            char* end = nullptr;
+                            double parsed = std::strtod(margin_env, &end);
+                            if (end == margin_env || *end != '\0' || !std::isfinite(parsed) ||
+                                parsed < -1e6 || parsed > 1e6) {
+                                std::fprintf(stderr,
+                                             "[worker] invalid OPENSCANNER_PLANE_MARGIN '%s'; our plane removal "
+                                             "disabled\n",
+                                             margin_env);
+                            } else {
+                                margin = parsed;
+                                margin_given = true;
+                            }
+                        }
+                        if (margin_env == nullptr || margin_env[0] == '\0' || margin_given) {
+                            uint32_t sample_stride = 1;
+                            if (cloud.num_points > kLiveBroadcastPointBudget) {
+                                sample_stride = (cloud.num_points + kLiveBroadcastPointBudget - 1) / kLiveBroadcastPointBudget;
+                            }
+                            std::vector<ObScanPoint> sample;
+                            sample.reserve(kLiveBroadcastPointBudget);
+                            for (uint32_t s = 0; s < cloud.num_points && sample.size() < kLiveBroadcastPointBudget; s += sample_stride) {
+                                sample.push_back(cloud.points[s]);
+                            }
+                            double extent = std::max(view_radius_guess(sample.data(), (uint32_t)sample.size()), 1e-6);
+                            if (!margin_given) margin = extent * 0.01; // drop the plane's own face too
+                            plane = FitDominantPlane(sample.data(), (uint32_t)sample.size(), 60, extent * 0.01,
+                                                     scanner_x, scanner_y, scanner_z, have_scanner_pose);
+                            if (plane.valid) { use_plane = true; ++g_our_plane_fits; }
+                        }
+                    }
                     uint32_t stride = 1;
-                    uint32_t broadcast_count = cloud.num_points;
-                    if (broadcast_count > kLiveBroadcastPointBudget) {
-                        stride = (broadcast_count + kLiveBroadcastPointBudget - 1) / kLiveBroadcastPointBudget;
-                        broadcast_count = (cloud.num_points + stride - 1) / stride;
+                    if (cloud.num_points > kLiveBroadcastPointBudget) {
+                        stride = (cloud.num_points + kLiveBroadcastPointBudget - 1) / kLiveBroadcastPointBudget;
                     }
-                    std::vector<float> xyz(static_cast<size_t>(broadcast_count) * 3);
-                    for (uint32_t i = 0, src = 0; i < broadcast_count; ++i, src += stride) {
-                        xyz[i * 3 + 0] = cloud.points[src].x;
-                        xyz[i * 3 + 1] = cloud.points[src].y;
-                        xyz[i * 3 + 2] = cloud.points[src].z;
+                    std::vector<float> xyz;
+                    xyz.reserve(static_cast<size_t>(kLiveBroadcastPointBudget) * 3);
+                    for (uint32_t src = 0; src < cloud.num_points; src += stride) {
+                        if (use_plane) {
+                            double dist = plane.a * cloud.points[src].x + plane.b * cloud.points[src].y +
+                                          plane.c * cloud.points[src].z + plane.d;
+                            if (dist < margin) { g_our_plane_cut.fetch_add(1); continue; }
+                            g_our_plane_kept.fetch_add(1);
+                        }
+                        xyz.push_back(cloud.points[src].x);
+                        xyz.push_back(cloud.points[src].y);
+                        xyz.push_back(cloud.points[src].z);
                     }
+                    uint32_t broadcast_count = static_cast<uint32_t>(xyz.size() / 3);
                     std::vector<uint8_t> buf = BuildFrame(frame_id++, NowMs(), xyz.data(), broadcast_count);
-                    server.BroadcastBinary(buf.data(), buf.size());
+                    post_timer.Stop();
+                    {
+                        perf::SegTimer bcast_timer(&s_bcast_us);
+                        server.BroadcastBinary(buf.data(), buf.size());
+                    }
+                    frame_points = broadcast_count;
+                    frame_bytes += buf.size();
             RecordFrame(buf);
                     ++g_cloud_frames_broadcast;
                 } else {
                     // Broadcast an empty frame too, so the UI's data-fps/HUD
                     // reflects a real, live connection rather than going idle.
-                    std::vector<uint8_t> buf = BuildFrame(frame_id++, NowMs(), nullptr, 0);
-                    server.BroadcastBinary(buf.data(), buf.size());
+                    std::vector<uint8_t> buf;
+                    {
+                        perf::SegTimer t(&s_post_us);
+                        buf = BuildFrame(frame_id++, NowMs(), nullptr, 0);
+                    }
+                    {
+                        perf::SegTimer bcast_timer(&s_bcast_us);
+                        server.BroadcastBinary(buf.data(), buf.size());
+                    }
+                    frame_bytes += buf.size();
             RecordFrame(buf);
                     ++g_cloud_frames_broadcast;
                 }
@@ -848,7 +1337,12 @@ int RunLiveServer(const std::string& library_path, uint16_t port, const std::str
         }
 
         if (tick % 10 == 0) {  // ~every 1s
-            server.BroadcastText(BuildStatusJson("live", control, /*fov_controllable=*/false));
+            std::string status_json = BuildStatusJson("live", control, /*fov_controllable=*/false);
+            {
+                perf::SegTimer bcast_timer(&s_bcast_us);
+                server.BroadcastText(status_json);
+            }
+            frame_bytes += status_json.size();
         }
         if (tick % 50 == 0) {  // ~every 5s
             std::printf("[worker] tick %d/%d: color_cloud num_points=%u (max seen so far: %u), clients=%zu, paused=%d\n",
@@ -856,7 +1350,11 @@ int RunLiveServer(const std::string& library_path, uint16_t port, const std::str
                         hardware_paused ? 1 : 0);
             std::fflush(stdout);
         }
+        tick_perf.EndTick(s_pose_us, s_getter_us, s_post_us, s_bcast_us, frame_points, frame_bytes);
     }
+
+    // Row #111: print before the teardown, which can hang (#89).
+    tick_perf.Summary();
 
     if (!hardware_paused) {
         status = lib.obscan_scan_pause(scan);
@@ -939,7 +1437,9 @@ int RunLiveServer(const std::string& library_path, uint16_t port, const std::str
     // destroys below then refuse (MULTI_CALLED / "must first wait other
     // process finished") until that tail completes, so poll them instead
     // of treating the first refusal as a failure.
+    QuitTrace("teardown: calling obscan_scan_stop(is_block=false)");
     status = lib.obscan_scan_stop(scan, &OnPreviewProgress, &OnPreviewStatus, /*is_block=*/false);
+    QuitTrace("teardown: obscan_scan_stop returned");
     Report("obscan_scan_stop", status);
 
     {
@@ -963,15 +1463,69 @@ int RunLiveServer(const std::string& library_path, uint16_t port, const std::str
                     polls, refusals, elapsed / 1000.0, StatusName(status));
         std::fflush(stdout);
         Report("obscan_session_destroy", status);
+        QuitTrace("teardown: session_destroy poll loop done");
     }
 
+    QuitTrace("teardown: starting context_destroy poll loop");
     {
         int polls = 0;
         int refusals = 0;
         auto started = std::chrono::steady_clock::now();
+        bool timed_out = false;
+        // Row #89: the bound must hold even when the thread that made the
+        // vendor call cannot itself make progress. The rerun showed the block
+        // entered and then no diagnostic at all (not even the lock-free
+        // "poll loop done" trace) for 119 s, so a bound enforced only by the
+        // calling thread is not a bound. This watchdog enforces it from a
+        // thread the hung vendor teardown cannot block, and exits with the
+        // timeout code if the caller never completes the wait.
+        openscanner::bounded::Watchdog watchdog(
+            []() {
+                QuitTracef("teardown: context_destroy: WATCHDOG fired (%d ms bound + %d ms grace exceeded); "
+                           "the caller never completed the wait - exiting %d",
+                           kContextDestroyCallTimeoutMs, kContextDestroyWatchdogGraceMs, kExitContextDestroyTimeout);
+                std::_Exit(kExitContextDestroyTimeout);
+            },
+            kContextDestroyWatchdogGraceMs);
         do {
             ++polls;
-            status = lib.obscan_context_destroy(&context);
+            // Arm the watchdog before anything that can block, so "the caller
+            // is stuck" is observable from here until the wait completes.
+            watchdog.Arm(kContextDestroyCallTimeoutMs);
+            QuitTracef("teardown: context_destroy: poll %d: entered the %d ms bound (before any allocation)",
+                       polls, kContextDestroyCallTimeoutMs);
+            // The thread owns its state: on the detached (timeout) path it
+            // may still be inside the vendor call after this scope ends, so
+            // shared_ptr captures keep status/finished/context alive.
+            auto destroy_fn = lib.obscan_context_destroy;
+            auto ctx = std::make_shared<ObScanContextHandle>(context);
+            auto finished = std::make_shared<std::atomic<bool>>(false);
+            auto result = std::make_shared<ObScanStatus>(OB_SCAN_ERROR_FATAL);
+            QuitTracef("teardown: context_destroy: poll %d: state allocated; spawning the vendor call", polls);
+            std::thread worker([destroy_fn, ctx, finished, result]() {
+                *result = destroy_fn(ctx.get());
+                finished->store(true, std::memory_order_release);
+            });
+            QuitTracef("teardown: context_destroy: poll %d: vendor call thread spawned; wait started (%d ms)",
+                       polls, kContextDestroyCallTimeoutMs);
+            auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kContextDestroyCallTimeoutMs);
+            while (!finished->load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+            // The wait is over either way: the caller is alive and owns the
+            // outcome from here. Stand the watchdog down before any output.
+            watchdog.Disarm();
+            if (!finished->load(std::memory_order_acquire)) {
+                timed_out = true;
+                status = OB_SCAN_ERROR_DEADLINE_EXCEEDED;
+                QuitTracef("teardown: context_destroy: poll %d: wait TIMED OUT after %d ms; abandoning context (not joined)",
+                           polls, kContextDestroyCallTimeoutMs);
+                worker.detach();
+                break;
+            }
+            QuitTracef("teardown: context_destroy: poll %d: wait returned (%s)", polls, StatusName(*result));
+            worker.join();
+            status = *result;
             if (status == OB_SCAN_ERROR_MULTI_CALLED) {
                 ++refusals;
                 if (refusals == 1 || refusals % 10 == 0) {
@@ -980,13 +1534,29 @@ int RunLiveServer(const std::string& library_path, uint16_t port, const std::str
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
-        } while (status == OB_SCAN_ERROR_MULTI_CALLED && polls < 3000);
+        } while (!timed_out && status == OB_SCAN_ERROR_MULTI_CALLED && polls < 3000);
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count();
-        std::printf("[worker] obscan_context_destroy: %d poll(s), %d refusal(s), %.1fs, final %s\n",
-                    polls, refusals, elapsed / 1000.0, StatusName(status));
-        std::fflush(stdout);
-        Report("obscan_context_destroy", status);
+        if (timed_out) {
+            // The vendor call never returned and its abandoned thread still
+            // holds whatever locks it grabbed. Every line on the abandon path
+            // goes through write(2), never stdout, so the outcome is reported
+            // even when the hung thread holds the stdio lock — which is the
+            // failure the rerun showed. The exit-code flag is set first, so
+            // main() reaches the timeout exit even if a later call blocks.
+            g_context_destroy_timed_out.store(true);
+            QuitTracef("teardown: context_destroy: ABANDONED after %.1fs (context left for process exit to reclaim)",
+                       elapsed / 1000.0);
+            QuitTracef("teardown: context_destroy -> ABANDONED (no vendor return); exiting %d", kExitContextDestroyTimeout);
+        } else {
+            // The vendor returned; stdout was never suspect on this path.
+            std::printf("[worker] obscan_context_destroy: %d poll(s), %d refusal(s), %.1fs, final %s\n",
+                        polls, refusals, elapsed / 1000.0, StatusName(status));
+            std::fflush(stdout);
+            Report("obscan_context_destroy", status);
+        }
+        QuitTrace("teardown: context_destroy poll loop done");
     }
+    QuitTrace("teardown complete");
 
     if (!g_record_path.empty()) {
         std::fstream out(g_record_path, std::ios::binary | std::ios::in | std::ios::out);
@@ -1005,9 +1575,31 @@ int RunLiveServer(const std::string& library_path, uint16_t port, const std::str
                 openscanner::frame_protocol::VERSION,
                 (unsigned long long)g_cloud_frames_broadcast.load(),
                 (unsigned long long)g_full_detail_chunks_broadcast.load());
+    {
+        std::printf("[worker] tracking_status samples=%llu histogram:",
+                    (unsigned long long)g_tracking_samples.load());
+        for (int i = 0; i < 16; ++i) {
+            uint64_t n = g_tracking_hist[i].load();
+            if (n > 0) std::printf(" %s=%llu", openscanner::tracking::TrackingStatusName(i), (unsigned long long)n);
+        }
+        std::printf("\n");
+    }
+    std::printf("[worker] our_plane_removal fits=%llu kept=%llu cut=%llu\n",
+                (unsigned long long)g_our_plane_fits.load(),
+                (unsigned long long)g_our_plane_kept.load(),
+                (unsigned long long)g_our_plane_cut.load());
     std::fflush(stdout);
 
     server.Stop();
+    QuitTrace("RunLiveServer returning (worker about to exit)");
+    if (g_context_destroy_timed_out.load()) {
+        // Row #89: lock-free, like the abandon path above — the hung vendor
+        // thread may still hold the stdio lock, and a blocked printf here
+        // would stop the process from ever returning this code.
+        QuitTracef("teardown: Exit code %d = context_destroy deadline exceeded (distinct from 2 = skipped/no dylib)",
+                   kExitContextDestroyTimeout);
+        return kExitContextDestroyTimeout;
+    }
     return 0;
 }
 
@@ -1106,6 +1698,7 @@ int RunReplayMode(int argc, char** argv) {
     }
 
     openscanner::WsBroadcastServer server;
+    ConfigureStatic(server);
     if (!server.Start(port)) {
         std::fprintf(stderr, "[worker] Failed to start WebSocket server on port %u\n", port);
         return 1;
@@ -1255,6 +1848,12 @@ int main(int argc, char** argv) {
     if (argc >= 2 && std::string(argv[1]) == "--replay") {
         std::unique_ptr<openscanner::CaptureSource> src(new ReplayCaptureSource(argc, argv));
         return src->run();
+    }
+
+    if (argc >= 2 && std::string(argv[1]) == "--synthetic") {
+        uint16_t port = argc > 2 ? static_cast<uint16_t>(std::atoi(argv[2])) : 8787;
+        RunSyntheticServer(port);
+        return 0;
     }
 
     uint16_t port = argc > 1 ? static_cast<uint16_t>(std::atoi(argv[1])) : 8787;
