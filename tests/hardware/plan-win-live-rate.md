@@ -29,9 +29,23 @@ if this procedure matches theirs.
 | 4 | Guard armed | the hardware rules are scoped to this room (`-wt-hw` in the path); a listener test outside it is blocked |
 | 5 | Device attached | `Get-PnpDevice -PresentOnly` shows `VID_2BC5` interfaces (Depth/IR/RGB) |
 | 6 | Daemon up | on Windows the RPC daemon is started by `CrealityScan.exe` — launch the app; there is no separate service |
+| 7 | Interposer | **N/A for interposer (macOS-only)** — the Vulkan interposer is a macOS-only mechanism and this lane cannot reproduce it; the preflight instead asserts the loader's vendor DLL path `C:\Program Files\CrealityScan\CrealityScan_Data\Plugins\x86_64\lib_orbbec_scan.dll` exists |
 
 If 2 or 3 fails, the tree is behind the parent (see PLAN #115) and the run would
 compare a number against nothing.
+
+### Attach sequence — one SDK user at a time
+
+The scanner is a single-client device; a second SDK user is the hard error. Do
+this in order, before starting:
+
+1. Confirm the Mac is not mid-run — no live session and no hardware test in
+   progress.
+2. Move the USB cable from the Mac to this Windows machine.
+3. Attach the scanner and confirm it enumerates: `Get-PnpDevice -PresentOnly`
+   shows `VID_2BC5` interfaces.
+4. Confirm the daemon state: launch `CrealityScan.exe` so its RPC daemon is up;
+   there is no separate service.
 
 ## Commands
 
@@ -79,6 +93,24 @@ Record these **as the run happens**, into the raw log alongside the record:
 - **machine spec** — Ryzen 9 5900X 12C/24T, 31.9 GB, Windows 11 Pro 26200,
   RTX 2080 Ti (11 GB; WMI's `AdapterRAM` caps at 4 GB and under-reports).
 
+### Crash sweep — Windows (after the run)
+
+Crash reports are part of the record. Windows has no `.ips`; sweep both sources:
+
+- **WER** — `C:\ProgramData\Microsoft\Windows\WER\ReportArchive`: the `.wer` and
+  the optional `.hdmp`.
+- **Event Log** — `Application Error`, EventID 1000.
+
+Match a report on its own `AppName`/`AppPath` and event time — **never on
+filenames**. Archive what is found beside the record (`<slug>.crash.wer` plus
+`<slug>.crash.hdmp`, or `<slug>.crash.event.txt`) and cite it from the record.
+If neither source yields a report for the run's time window, the record must
+print exactly:
+
+`no Windows crash-report source available - sweep not performed`
+
+Never write "no crash".
+
 ## Where the output goes
 
 - **Record**: `tests/results/<date>-win-live-rate-<slug>.md` — one file per run,
@@ -88,6 +120,23 @@ Record these **as the run happens**, into the raw log alongside the record:
   raw evidence in the same change; a record without one is a claim without proof.
 - Both are **agent tier**: the PR needs a verifier verdict naming the exact head
   commit before it merges.
+
+### Record header and verdicts
+
+Start every record with these fields, in this order (they are compared across
+machines):
+
+- Date:
+- Worktree:
+- Branch:
+- Target:
+- Other copy:
+- Preflight:
+- Interposer: N/A for interposer (macOS-only); DLL path verified: <the path preflight printed>
+- Run start:
+
+Use `PASS`, `FAIL`, `SKIP`, or `N/A` for each check and the run verdict; an
+`N/A` is never blank — it names the reason and what was checked instead.
 
 ## Reconcile — after the record lands
 
