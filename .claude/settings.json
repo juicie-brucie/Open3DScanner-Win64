@@ -21,7 +21,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/guard-hw-run.sh"
+            "command": "powershell -NoProfile -ExecutionPolicy Bypass -File .claude/hooks/guard-hw-run.ps1"
           }
         ]
       }
