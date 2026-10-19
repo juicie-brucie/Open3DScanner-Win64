@@ -149,7 +149,7 @@ if ($first.Kind -eq 'wer') {
         Copy-Item -LiteralPath $first.Hdmp -Destination (Join-Path 'tests/results' ($Slug + '.hdmp')) -Force
     }
 } else {
-    $dest = Join-Path 'tests/results' ($Slug + '.event.txt')
+    $dest = Join-Path 'tests/results' ($Slug + '.event.log')
     (($first.Event | Format-List * | Out-String)) | Set-Content -LiteralPath $dest -Encoding UTF8
 }
 $sha = (Get-FileHash -LiteralPath $dest -Algorithm SHA256).Hash.ToLower()

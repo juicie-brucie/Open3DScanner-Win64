@@ -1,0 +1,48 @@
+﻿
+
+Message              : Faulting application name: scan_server.exe, version: 0.0.0.0, time stamp: 0x6ad69cc4
+                       Faulting module name: lib_orbbec_scan.dll, version: 3.5.3.921, time stamp: 0x6ab12b05
+                       Exception code: 0xc0000005
+                       Fault offset: 0x0000000000872677
+                       Faulting process id: 0x136C
+                       Faulting application start time: 0x1DD601B3043C01D
+                       Faulting application path: C:\Users\Bruce\Documents\Github\Open3DScanner-Win64-wt-hw\build\tools
+                       \scan_server\scan_server.exe
+                       Faulting module path: C:\Program 
+                       Files\CrealityScan\CrealityScan_Data\Plugins\x86_64\lib_orbbec_scan.dll
+                       Report Id: a20a5427-c568-47e8-b1e7-9fbbb7b73713
+                       Faulting package full name: 
+                       Faulting package-relative application ID: 
+Id                   : 1000
+Version              : 0
+Qualifiers           : 
+Level                : 2
+Task                 : 100
+Opcode               : 0
+Keywords             : -9223372036854775808
+RecordId             : 24164
+ProviderName         : Application Error
+ProviderId           : a0e9b465-b939-57d7-b27d-95d8e925ff57
+LogName              : Application
+ProcessId            : 25648
+ThreadId             : 4348
+MachineName          : DESKTOP-8U986JF
+UserId               : S-1-5-21-1705544089-1983637947-1524770790-1001
+TimeCreated          : 10/19/2026 3:43:01 PM
+ActivityId           : 
+RelatedActivityId    : 
+ContainerLog         : Application
+MatchedQueryIds      : {0}
+Bookmark             : System.Diagnostics.Eventing.Reader.EventBookmark
+LevelDisplayName     : Error
+OpcodeDisplayName    : Info
+TaskDisplayName      : Application Crashing Events
+KeywordsDisplayNames : {}
+Properties           : {System.Diagnostics.Eventing.Reader.EventProperty, 
+                       System.Diagnostics.Eventing.Reader.EventProperty, 
+                       System.Diagnostics.Eventing.Reader.EventProperty, 
+                       System.Diagnostics.Eventing.Reader.EventProperty...}
+
+
+
+

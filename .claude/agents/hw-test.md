@@ -120,7 +120,7 @@ Application event log's **EventID 1000** ("Application Error"). It matches on th
 report's **own fields** — `AppName`/`AppPath` and the report/event time — never on
 a filename. It keeps only reports naming your target at or after the run start,
 archives the **earliest** as `<record-slug>.wer` (+ `.hdmp` when present) or
-`<record-slug>.event.txt`, lists any others, and prints a reference line with the
+`<record-slug>.event.log`, lists any others, and prints a reference line with the
 file's `sha256`.
 
 If neither source yields a report, the script prints exactly:
