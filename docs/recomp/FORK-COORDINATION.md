@@ -91,3 +91,11 @@ _Append dated one-liners: what changed, which side, and the outcome. Newest last
   Pass `-R` explicitly or set `GH_REPO`. `verify-pr.py` is unaffected because it derives the
   repo from `origin`. Fix in flight for `watch-sessions.ps1`; the bash original has the same
   latent behaviour.
+
+- `[win]` 2026-10-19 — round landed: `engine/`, `tools/`, `ui/` consumed parent `7537e44`
+  (PR #17 @ `f2e9003`); `scripts/verify-pr.py` carries the parent delta `ba53665..83a4de49`
+  plus the lane's adaptations, including guard selection by lane rather than host (52-case
+  selftest); contract pin `1ace2dc8` unchanged. Divergence recorded: `win #119` fixes
+  `engine/src/obscan_loader.cpp` (`_WIN32`: `LoadLibraryExA(..., LOAD_WITH_ALTERED_SEARCH_PATH)`)
+  — a **parent-synced file**, merged at `bfa3df3`; the patch is with the parent dispatcher for
+  fold-in. Until it is upstream, an `engine/` re-sync would revert it.
