@@ -182,11 +182,44 @@ def test_tier(vp):
            vp.tier_of(["tests/results/2026-10-18-anything.md"]))
 
 
+def test_pin(vp):
+    """The pin check must measure the COMMITTED blob, not the working tree.
+
+    The false NEEDS CHANGE on the contract-sync PR came from hashing the disk
+    file: a working-tree modification (or a line-ending touch) must not fool the
+    check when the committed blob is correct.
+    """
+    ok, detail = vp.check_contract_pin()
+    record("pin: the committed pin matches the committed header", ok, detail)
+
+    header = os.path.join(REPO_ROOT, vp.PIN_HEADER)
+    try:
+        original = open(header, "rb").read()
+    except OSError as e:
+        record("pin: could read the header for the working-tree test", False, str(e))
+        return
+    try:
+        with open(header, "ab") as fh:
+            fh.write(b"\n// working-tree scratch: this must NOT affect the pin check\n")
+        modified_ok, modified_detail = vp.check_contract_pin()
+        record(
+            "pin: a working-tree edit does not fool the committed-blob check",
+            modified_ok,
+            modified_detail if modified_ok else f"FALSE FAIL after working-tree edit: {modified_detail}",
+        )
+    finally:
+        with open(header, "wb") as fh:
+            fh.write(original)
+    restored_ok, _ = vp.check_contract_pin()
+    record("pin: restored working tree still passes", restored_ok, "")
+
+
 def main():
     test_verdict_parser()
     test_verdict_workflow_drift_guard()
     vp = load_verify_pr()
     test_tier(vp)
+    test_pin(vp)
 
     width = max(len(n) for n, _, _ in results)
     for name, ok, detail in results:
