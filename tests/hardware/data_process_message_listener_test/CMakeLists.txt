@@ -5,6 +5,7 @@ target_link_libraries(data_process_message_listener_test PRIVATE openscanner_eng
 # builds this test WITHOUT an interposer; the launcher states that at run time.
 if(WIN32)
     message(STATUS "data_process_message_listener_test: no interposer on Windows (macOS-only mechanism)")
+    target_link_libraries(data_process_message_listener_test PRIVATE setupapi)
 endif()
 
 if(APPLE)

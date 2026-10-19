@@ -136,10 +136,29 @@ if ($conflict.Count -gt 0) {
     Die ('a conflicting SDK client is already running: ' + ($conflict -join ' ') + ' - one run at a time.')
 }
 
-# 5. Interposer N/A is not blank: assert what we CAN check on Windows - that the
-#    loader resolves the vendor DLL at the expected CrealityScan plugin path (the
-#    same candidates engine/src/obscan_loader.cpp uses). The record then reads
-#    "N/A for interposer; DLL path verified", not an empty N/A.
+# 5. Interposer N/A is not blank: assert what we CAN check on Windows - the
+#    loader's vendor DLL path exists, the DLL actually loads with its adjacent
+#    dependencies, and one bootstrap export resolves. A present-but-unloadable
+#    SDK is a FAIL, not a test SKIP.
+if (-not ('ScannerNative' -as [type])) {
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class ScannerNative {
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Ansi)]
+    public static extern IntPtr LoadLibraryExA(string lpLibFileName, IntPtr hFile, uint dwFlags);
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Ansi)]
+    public static extern IntPtr GetProcAddress(IntPtr hModule, string lpProcName);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool FreeLibrary(IntPtr hModule);
+
+    public const uint LOAD_WITH_ALTERED_SEARCH_PATH = 0x00000008;
+}
+'@
+}
 $dllCandidates = @(
     'C:\Program Files\CrealityScan\CrealityScan_Data\Plugins\x86_64\lib_orbbec_scan.dll',
     'C:\Program Files (x86)\CrealityScan\CrealityScan_Data\Plugins\x86_64\lib_orbbec_scan.dll'
@@ -148,10 +167,27 @@ $dllPath = $dllCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-
 if ($Target -eq 'raptor_client') {
     $interp = 'N/A for interposer (macOS-only); links no vendor SDK (socket/STL only) - no DLL-path check applies'
 } elseif ($dllPath) {
-    $interp = "N/A for interposer (macOS-only); DLL path verified: $dllPath"
+    $handle = [ScannerNative]::LoadLibraryExA($dllPath, [IntPtr]::Zero,
+                                              [ScannerNative]::LOAD_WITH_ALTERED_SEARCH_PATH)
+    if ($handle -eq [IntPtr]::Zero) {
+        $code = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        Die "vendor SDK present but not loadable on Windows: LoadLibraryExA('$dllPath') failed (GetLastError=$code). Do not start the run."
+    }
+    $symbol = [IntPtr]::Zero
+    $symbolError = 0
+    try {
+        $symbol = [ScannerNative]::GetProcAddress($handle, 'obscan_context_create')
+        $symbolError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+    } finally {
+        [void][ScannerNative]::FreeLibrary($handle)
+    }
+    if ($symbol -eq [IntPtr]::Zero) {
+        Die "vendor SDK loaded but obscan_context_create did not resolve: GetProcAddress('$dllPath', 'obscan_context_create') failed (GetLastError=$symbolError). Do not start the run."
+    }
+    $interp = "N/A for interposer (macOS-only); DLL path verified; load asserted (obscan_context_create resolved); path: $dllPath"
 } else {
     $interp = 'N/A for interposer (macOS-only); DLL path NOT found at ' + ($dllCandidates -join ' OR ') +
-        ' - the test will SKIP (2) if no vendor SDK is loadable'
+        ' - the vendor SDK is absent; no load assertion was possible'
 }
 
 # --- all checks passed: emit the pre-filled record header ---

@@ -13,6 +13,7 @@ target_link_libraries(device_message_listener_test PRIVATE openscanner_engine)
 # to a Mac run on this axis - do not record it as if it were.
 if(WIN32)
     message(STATUS "device_message_listener_test: no interposer on Windows (macOS-only mechanism)")
+    target_link_libraries(device_message_listener_test PRIVATE setupapi)
 endif()
 
 if(APPLE)
