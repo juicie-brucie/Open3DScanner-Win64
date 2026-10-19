@@ -52,7 +52,7 @@ call (each shell call is a fresh process).
 Every value below was found as a standalone little-endian integer in
 `lib_orbbec_scan.dll` and matches the macOS-recovered header value exactly.
 
-### OBScanStatus — 39 of 41 named values found
+### OBScanStatus — 40 of 43 named values found
 
 | Symbol | macOS value | Windows value | Match? |
 |---|---|---|---|
@@ -140,7 +140,7 @@ Not found: `OB_SCAN_MESSAGE_ID_DEVICE_TIPS_INFRARED_MODE_WITH_FILTER_OUTDOORS`
 (308412930), `OB_SCAN_MESSAGE_ID_DEVICE_TIPS_INFRARED_MARKER_MODE_WITHOUT_FILTER`
 (308412932) — see below.
 
-### Control message IDs — 22 of 26 found
+### Control message IDs — 20 of 24 found
 
 All found values match macOS exactly, including:
 `RAPTOR_MIDDLE_BUTTON_SHORT_PRESS` = 0, `RAPTOR_MIDDLE_BUTTON_LONG_PRESS` =
