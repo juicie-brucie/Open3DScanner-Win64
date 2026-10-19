@@ -29,7 +29,7 @@ if this procedure matches theirs.
 | 4 | Guard armed | the hardware rules are scoped to this room (`-wt-hw` in the path); a listener test outside it is blocked |
 | 5 | Device attached | `Get-PnpDevice -PresentOnly` shows `VID_2BC5` interfaces (Depth/IR/RGB) |
 | 6 | Daemon up | on Windows the RPC daemon is started by `CrealityScan.exe` — launch the app; there is no separate service |
-| 7 | Interposer | **N/A for interposer (macOS-only)** — the Vulkan interposer is a macOS-only mechanism and this lane cannot reproduce it; the preflight instead asserts the loader's vendor DLL path `C:\Program Files\CrealityScan\CrealityScan_Data\Plugins\x86_64\lib_orbbec_scan.dll` exists |
+| 7 | Interposer | **N/A for interposer (macOS-only)** — the Vulkan interposer is a macOS-only mechanism and this lane cannot reproduce it; the preflight instead asserts the loader's vendor DLL `C:\Program Files\CrealityScan\CrealityScan_Data\Plugins\x86_64\lib_orbbec_scan.dll` **loads** (`LoadLibraryExA` + `obscan_context_create` resolves) and the RPC daemon host from #6 is running |
 
 If 2 or 3 fails, the tree is behind the parent (see PLAN #115) and the run would
 compare a number against nothing.

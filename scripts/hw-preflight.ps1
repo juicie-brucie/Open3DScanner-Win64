@@ -136,22 +136,75 @@ if ($conflict.Count -gt 0) {
     Die ('a conflicting SDK client is already running: ' + ($conflict -join ' ') + ' - one run at a time.')
 }
 
-# 5. Interposer N/A is not blank: assert what we CAN check on Windows - that the
-#    loader resolves the vendor DLL at the expected CrealityScan plugin path (the
-#    same candidates engine/src/obscan_loader.cpp uses). The record then reads
-#    "N/A for interposer; DLL path verified", not an empty N/A.
+# 5. Interposer N/A is not blank: assert what we CAN check on Windows - the
+#    loader's vendor DLL path exists, the DLL actually loads with its adjacent
+#    dependencies, and one bootstrap export resolves. A present-but-unloadable
+#    SDK is a FAIL, not a test SKIP. Also assert the RPC daemon host's process;
+#    that check is a stated proxy, not a service query.
+if (-not ('ScannerNative' -as [type])) {
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class ScannerNative {
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Ansi)]
+    public static extern IntPtr LoadLibraryExA(string lpLibFileName, IntPtr hFile, uint dwFlags);
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Ansi)]
+    public static extern IntPtr GetProcAddress(IntPtr hModule, string lpProcName);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool FreeLibrary(IntPtr hModule);
+
+    public const uint LOAD_WITH_ALTERED_SEARCH_PATH = 0x00000008;
+}
+'@
+}
 $dllCandidates = @(
     'C:\Program Files\CrealityScan\CrealityScan_Data\Plugins\x86_64\lib_orbbec_scan.dll',
     'C:\Program Files (x86)\CrealityScan\CrealityScan_Data\Plugins\x86_64\lib_orbbec_scan.dll'
 )
 $dllPath = $dllCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+$daemonNote = ''
 if ($Target -eq 'raptor_client') {
     $interp = 'N/A for interposer (macOS-only); links no vendor SDK (socket/STL only) - no DLL-path check applies'
-} elseif ($dllPath) {
-    $interp = "N/A for interposer (macOS-only); DLL path verified: $dllPath"
 } else {
-    $interp = 'N/A for interposer (macOS-only); DLL path NOT found at ' + ($dllCandidates -join ' OR ') +
-        ' - the test will SKIP (2) if no vendor SDK is loadable'
+    $loaded = $false
+    if ($dllPath) {
+        $handle = [ScannerNative]::LoadLibraryExA($dllPath, [IntPtr]::Zero,
+                                                  [ScannerNative]::LOAD_WITH_ALTERED_SEARCH_PATH)
+        if ($handle -eq [IntPtr]::Zero) {
+            $code = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+            Die "vendor SDK present but not loadable on Windows: LoadLibraryExA('$dllPath') failed (GetLastError=$code). Do not start the run."
+        }
+        $symbol = [IntPtr]::Zero
+        $symbolError = 0
+        try {
+            $symbol = [ScannerNative]::GetProcAddress($handle, 'obscan_context_create')
+            $symbolError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        } finally {
+            [void][ScannerNative]::FreeLibrary($handle)
+        }
+        if ($symbol -eq [IntPtr]::Zero) {
+            Die "vendor SDK loaded but obscan_context_create did not resolve: GetProcAddress('$dllPath', 'obscan_context_create') failed (GetLastError=$symbolError). Do not start the run."
+        }
+        $loaded = $true
+    }
+
+    # The RPC daemon is started by CrealityScan.exe; there is no separate service
+    # to query. This image-name check is a PROXY: if the app can exit while the
+    # daemon persists, it under-reports. It is not a service check.
+    $daemonRunning = @(Get-Process -Name CrealityScan -ErrorAction SilentlyContinue).Count -gt 0
+    if (-not $daemonRunning) {
+        Die 'daemon: NOT running - launch CrealityScan.exe before the run'
+    }
+    if ($loaded) {
+        $interp = "N/A for interposer (macOS-only); DLL path verified; load asserted (obscan_context_create resolved); daemon: running; path: $dllPath"
+    } else {
+        $interp = 'N/A for interposer (macOS-only); DLL path NOT found at ' + ($dllCandidates -join ' OR ') +
+            ' - the vendor SDK is absent; no load assertion was possible; daemon: running'
+    }
+    $daemonNote = '; daemon: running (CrealityScan.exe process; proxy, not a service check)'
 }
 
 # --- all checks passed: emit the pre-filled record header ---
@@ -163,7 +216,7 @@ Write-Output ("- Worktree: " + $wtReal)
 Write-Output ("- Branch: " + $branch)
 Write-Output ("- Target: " + $bin + "  (" + $why + ")")
 Write-Output ("- Other copy: " + $(if ($alt) { $alt } else { 'none' }))
-Write-Output ("- Preflight: pwd OK; no conflicting process; freshness: " + $fresh)
+Write-Output ("- Preflight: pwd OK; no conflicting process; freshness: " + $fresh + $daemonNote)
 Write-Output ("- Interposer: " + $interp)
 Write-Output ("- Run start: " + (Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))
 Write-Output '----8<----------------------------------8<----'

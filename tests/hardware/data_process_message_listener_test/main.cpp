@@ -24,6 +24,13 @@
 #include <dlfcn.h>
 #endif
 
+#if defined(_WIN32)
+#include <windows.h>
+#include <setupapi.h>
+#include <tlhelp32.h>
+#include <cctype>
+#endif
+
 // (No CoreFoundation here: it existed only for the macOS interposer path. This
 // port has no Windows use for it, so it is removed rather than left as dead
 // macOS-only noise.)
@@ -89,6 +96,80 @@ std::string TempLogDir(const char* name) {
 #endif
 }
 
+#if defined(_WIN32)
+// Preconditions the runbook names before a hardware run: the CrealityScan RPC
+// daemon host is running, and a VID_2BC5 interface is present. A missing
+// precondition is a SKIP (exit 2); a failure after both are true is a genuine
+// init failure (exit 1). "Unknown" means the probe itself failed - never
+// reported as "absent".
+enum class Presence { Present, Absent, Unknown };
+
+Presence QueryProcess(const wchar_t* image_name) {
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return Presence::Unknown;
+    Presence result = Presence::Absent;
+    PROCESSENTRY32W entry{};
+    entry.dwSize = sizeof(entry);
+    if (Process32FirstW(snap, &entry)) {
+        do {
+            if (_wcsicmp(entry.szExeFile, image_name) == 0) {
+                result = Presence::Present;
+                break;
+            }
+        } while (Process32NextW(snap, &entry));
+    } else {
+        result = Presence::Unknown;
+    }
+    CloseHandle(snap);
+    return result;
+}
+
+bool ContainsCaseInsensitive(const std::string& haystack, const char* needle) {
+    std::string h = haystack;
+    std::string n = needle;
+    for (char& c : h) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    for (char& c : n) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return h.find(n) != std::string::npos;
+}
+
+Presence QueryVid2bc5Device() {
+    HDEVINFO devices = SetupDiGetClassDevsA(nullptr, "USB", nullptr,
+                                            DIGCF_PRESENT | DIGCF_ALLCLASSES);
+    if (devices == INVALID_HANDLE_VALUE) return Presence::Unknown;
+    Presence result = Presence::Absent;
+    SP_DEVINFO_DATA info{};
+    info.cbSize = sizeof(info);
+    for (DWORD i = 0;; ++i) {
+        if (!SetupDiEnumDeviceInfo(devices, i, &info)) {
+            if (GetLastError() != ERROR_NO_MORE_ITEMS) result = Presence::Unknown;
+            break;
+        }
+        DWORD type = 0;
+        DWORD needed = 0;
+        SetupDiGetDeviceRegistryPropertyA(devices, &info, SPDRP_HARDWAREID, &type,
+                                          nullptr, 0, &needed);
+        if (needed == 0) continue;
+        std::vector<char> ids(needed + 2, 0);
+        if (!SetupDiGetDeviceRegistryPropertyA(devices, &info, SPDRP_HARDWAREID, &type,
+                                               reinterpret_cast<PBYTE>(ids.data()),
+                                               needed, &needed)) {
+            continue;
+        }
+        for (size_t off = 0; off < needed && ids[off] != '\0';) {
+            std::string id(&ids[off]);
+            if (ContainsCaseInsensitive(id, "VID_2BC5")) {
+                result = Presence::Present;
+                break;
+            }
+            off += id.size() + 1;
+        }
+        if (result == Presence::Present) break;
+    }
+    SetupDiDestroyDeviceInfoList(devices);
+    return result;
+}
+#endif
+
 int RunTests(const std::string& library_path) {
     std::printf("[worker] Loading OBScan SDK from: %s\n", library_path.c_str());
     openscanner::ObscanLibrary* libptr = nullptr;
@@ -111,6 +192,35 @@ int RunTests(const std::string& library_path) {
     }
     openscanner::ObscanLibrary& lib = *libptr;
 
+#if defined(_WIN32)
+    const Presence daemon = QueryProcess(L"CrealityScan.exe");
+    const Presence device = QueryVid2bc5Device();
+    std::printf("[worker] precondition: CrealityScan.exe (RPC daemon host): %s\n",
+                daemon == Presence::Present ? "running" :
+                daemon == Presence::Absent ? "NOT running" : "probe failed");
+    std::printf("[worker] precondition: VID_2BC5 device: %s\n",
+                device == Presence::Present ? "enumerated" :
+                device == Presence::Absent ? "NOT enumerated" : "probe failed");
+    std::fflush(stdout);
+    if (daemon == Presence::Unknown || device == Presence::Unknown) {
+        std::printf("[worker] SKIP: precondition probe failed (CrealityScan.exe: %s; VID_2BC5: %s); listener checks NOT exercised.\n",
+                    daemon == Presence::Unknown ? "probe failed" : "ok",
+                    device == Presence::Unknown ? "probe failed" : "ok");
+        std::fflush(stdout);
+        return 2;
+    }
+    if (daemon == Presence::Absent) {
+        std::printf("[worker] SKIP: precondition not met: CrealityScan.exe (RPC daemon host) is not running; listener checks NOT exercised.\n");
+        std::fflush(stdout);
+        return 2;
+    }
+    if (device == Presence::Absent) {
+        std::printf("[worker] SKIP: precondition not met: no VID_2BC5 device enumerated; listener checks NOT exercised.\n");
+        std::fflush(stdout);
+        return 2;
+    }
+#endif
+
     std::string streaming_assets = openscanner::ObscanLibrary::FindStreamingAssetsDirForLibraryPath(library_path);
     std::string sdk_log_dir = TempLogDir("openscanner_ob_sdk_log");
     std::string scan_log_dir = TempLogDir("openscanner_ob_scan_log");
@@ -125,7 +235,11 @@ int RunTests(const std::string& library_path) {
     ObScanContextHandle context = nullptr;
     ObScanStatus status = lib.obscan_context_create(&context, &config);
     std::printf("[worker] obscan_context_create() -> %s (%d)\n", StatusName(status), (int)status);
-    if (status != OB_SCAN_SUCCESS) return 1;
+    if (status != OB_SCAN_SUCCESS) {
+        std::printf("[worker] FAIL: preconditions met but obscan_context_create() failed; this is a genuine init failure.\n");
+        std::fflush(stdout);
+        return 1;
+    }
 
     // NULL context.
     status = lib.obscan_context_add_data_msg_listener(nullptr, &g_data_listener_a);
