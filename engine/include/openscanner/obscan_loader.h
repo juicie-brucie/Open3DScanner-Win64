@@ -69,6 +69,11 @@ public:
     fn_obscan_scan_pause obscan_scan_pause = nullptr;
     fn_obscan_scan_stop obscan_scan_stop = nullptr;
     fn_obscan_scan_get_raw_cloud obscan_scan_get_raw_cloud = nullptr;
+    fn_obscan_frame_get_frame_tracking_status obscan_frame_get_frame_tracking_status = nullptr;
+    fn_obscan_frame_release obscan_frame_release = nullptr;
+    fn_obscan_scan_plane_remove obscan_scan_plane_remove = nullptr;
+    fn_obscan_scan_turntable_plane_remove obscan_scan_turntable_plane_remove = nullptr;
+    fn_obscan_scan_config_manaul_remove_plane obscan_scan_config_manaul_remove_plane = nullptr;
     fn_obscan_scan_get_global_pose obscan_scan_get_global_pose = nullptr;
     fn_obscan_scan_get_registration_pose obscan_scan_get_registration_pose = nullptr;
     fn_obscan_scan_get_model_point_color_clouds obscan_scan_get_model_point_color_clouds = nullptr;

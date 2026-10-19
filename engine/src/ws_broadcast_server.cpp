@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <fstream>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -265,6 +266,7 @@ struct WsBroadcastServer::Impl {
     socket_t listen_socket = OPENSCANNER_INVALID_SOCKET;
     std::thread accept_thread;
 
+    std::string static_root;
     mutable std::mutex clients_mutex;
     std::vector<socket_t> clients;
     std::vector<std::thread> reader_threads;
@@ -319,6 +321,46 @@ struct WsBroadcastServer::Impl {
         }
     }
 
+    // Serves one static file for a plain HTTP GET (the UI), then returns
+    // false so the accept loop closes the one-shot connection. Only
+    // reachable when SetStaticRoot() supplied a directory.
+    bool ServeStaticRequest(socket_t client, const std::string& request) {
+        if (static_root.empty()) return false;
+        size_t line_end = request.find("\r\n");
+        std::string request_line = request.substr(0, line_end == std::string::npos ? request.size() : line_end);
+        if (request_line.compare(0, 4, "GET ") != 0) return false;
+        std::string path = request_line.substr(4);
+        size_t space = path.find(' ');
+        if (space != std::string::npos) path = path.substr(0, space);
+        size_t query = path.find('?');
+        if (query != std::string::npos) path = path.substr(0, query);
+        if (path == "/" || path.empty()) path = "/index.html";
+        if (path.find("..") != std::string::npos) return false;
+
+        std::ifstream in(static_root + path, std::ios::binary);
+        if (!in) {
+            const char* not_found = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            SendAll(client, reinterpret_cast<const uint8_t*>(not_found), std::strlen(not_found));
+            return false;
+        }
+        std::string body((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        const char* type = "application/octet-stream";
+        auto ends_with = [&path](const char* suffix) {
+            size_t n = std::strlen(suffix);
+            return path.size() >= n && path.compare(path.size() - n, n, suffix) == 0;
+        };
+        if (ends_with(".html")) type = "text/html; charset=utf-8";
+        else if (ends_with(".js")) type = "text/javascript; charset=utf-8";
+        else if (ends_with(".css")) type = "text/css; charset=utf-8";
+        else if (ends_with(".json")) type = "application/json";
+        std::string header = "HTTP/1.1 200 OK\r\nContent-Type: " + std::string(type) +
+                             "\r\nContent-Length: " + std::to_string(body.size()) +
+                             "\r\nConnection: close\r\n\r\n";
+        SendAll(client, reinterpret_cast<const uint8_t*>(header.data()), header.size());
+        if (!body.empty()) SendAll(client, reinterpret_cast<const uint8_t*>(body.data()), body.size());
+        return false;  // one-shot connection; accept loop closes it
+    }
+
     bool PerformHandshake(socket_t client) {
         char buf[4096];
 #if defined(_WIN32)
@@ -330,7 +372,9 @@ struct WsBroadcastServer::Impl {
         std::string request(buf, static_cast<size_t>(n));
 
         std::string client_key;
-        if (!FindHeaderValue(request, "Sec-WebSocket-Key", &client_key)) return false;
+        if (!FindHeaderValue(request, "Sec-WebSocket-Key", &client_key)) {
+            return ServeStaticRequest(client, request);
+        }
 
         std::string accept_key = ComputeAcceptKey(client_key);
         std::string response = "HTTP/1.1 101 Switching Protocols\r\n"
@@ -384,6 +428,8 @@ struct WsBroadcastServer::Impl {
 WsBroadcastServer::WsBroadcastServer() : impl_(std::make_unique<Impl>()) {}
 
 WsBroadcastServer::~WsBroadcastServer() { Stop(); }
+
+void WsBroadcastServer::SetStaticRoot(const std::string& dir) { impl_->static_root = dir; }
 
 void WsBroadcastServer::SetTextMessageHandler(TextMessageHandler handler) {
     std::lock_guard<std::mutex> lock(impl_->handler_mutex);

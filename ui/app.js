@@ -121,6 +121,39 @@
   let viewDistance = 4.2;
   let viewRadius = 1.0;
 
+  // Coverage (G2): a voxel grid over our own live data. Visited voxels are
+  // those the scanner has been near (pose translations); seen voxels are
+  // those with cloud points. Under-covered = seen but not visited, painted
+  // red as a second point set. Cell size follows the scene scale.
+  const coverageVisited = new Set();
+  const coverageSeen = new Set();
+  let underPositions = new Float32Array(0);
+  let underCount = 0;
+  const kUnderCoveredBudget = 20000;
+  function coverageCell() {
+    return Math.max(viewRadius / 20, 1e-4);
+  }
+  function voxelKey(x, y, z, cell) {
+    return Math.round(x / cell) + "," + Math.round(y / cell) + "," + Math.round(z / cell);
+  }
+  // Debug/acceptance hook: a hardware run can read the coverage counters
+  // from the console without relying on the HUD's rAF refresh.
+  window.openScannerCoverage = () => ({
+    visited: coverageVisited.size, seen: coverageSeen.size, underCoveredPoints: underCount,
+  });
+  function markVisited(x, y, z) {
+    const cell = coverageCell();
+    const r = 2; // ~2 cells of scanner proximity counts as visited
+    const cx = Math.round(x / cell), cy = Math.round(y / cell), cz = Math.round(z / cell);
+    for (let i = -r; i <= r; i++) {
+      for (let j = -r; j <= r; j++) {
+        for (let k = -r; k <= r; k++) {
+          coverageVisited.add((cx + i) + "," + (cy + j) + "," + (cz + k));
+        }
+      }
+    }
+  }
+
   // Driven by the server's status messages (see handleStatus below), not
   // read locally: "zoom" here means the scanner's own field of view
   // (ObScanFov in obscan_api.h — a real two-position switch on the actual
@@ -175,6 +208,22 @@
   let ws = null;
   let latestStatus = null;
 
+  // Tracking-status hysteresis (row #81; findings tracking-mechanism.md §1):
+  // the vendor reports FAILURE_MARKERLESS (5) as LOST (1) for its first two
+  // consecutive occurrences and 5 from the third; any non-5 resets. We
+  // mirror the same window client-side so the HUD's reason is deliberate.
+  const kTrackingNames = ["SUCCESS", "LOST", "AMBIGUOUS_PLANE", "FAILURE_INSUFF_VALID_POINTS",
+                          "FAILURE_TEXTURELESS", "FAILURE_MARKERLESS", "FAILURE_MOVING_TOO_FAST"];
+  let markerlessRun = 0;
+  function effectiveTracking(raw) {
+    if (raw === 5) {
+      markerlessRun += 1;
+      return markerlessRun >= 3 ? 5 : 1;
+    }
+    markerlessRun = 0;
+    return raw;
+  }
+
   function sendCommand(cmd) {
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify(cmd));
@@ -225,6 +274,7 @@
       const poseFrame = FrameProtocol.decodePose(buf);
       if (poseFrame) {
         scannerPose = poseFrame.translation;
+        markVisited(scannerPose[0], scannerPose[1], scannerPose[2]);
         if (cameraMode === "follow") viewCenter = scannerPose.slice();
         return;
       }
@@ -252,6 +302,22 @@
       pointCount = count;
       lastFrameId = frameId;
       framesReceived++;
+
+      // Coverage: mark every point's voxel as seen; points in unseen
+      // (under-covered) voxels go to the red overlay, capped for the wire.
+      const cell = coverageCell();
+      const under = [];
+      for (let i = 0; i < count; i++) {
+        const x = frame.positions[i * 3], y = frame.positions[i * 3 + 1], z = frame.positions[i * 3 + 2];
+        const key = voxelKey(x, y, z, cell);
+        coverageSeen.add(key);
+        if (!coverageVisited.has(key) && under.length < kUnderCoveredBudget) {
+          under.push(x, y, z);
+        }
+      }
+      underCount = under.length / 3;
+      underPositions = new Float32Array(under);
+      renderer.uploadOverlay(underPositions);
 
       const latency = Date.now() - captureTimestampMs;
       latencySamples.push(latency);
@@ -298,6 +364,9 @@
       return;
     }
     if (!status || status.type !== "status") return;
+    if (typeof status.tracking === "number") {
+      status.effectiveTracking = effectiveTracking(status.tracking);
+    }
     latestStatus = status;
 
     // FOV is a real two-position switch on the actual scanner hardware
@@ -385,7 +454,7 @@
     const proj = perspective(fovRad(), aspect, near, far);
     const view = translation(-viewCenter[0], -viewCenter[1], -viewCenter[2] - viewDistance);
     const matrix = multiply(proj, view);
-    renderer.draw(matrix, brightness, pointCount);
+    renderer.draw(matrix, brightness, pointCount, underCount);
     framePending = false;
     renderFrames++;
 
@@ -400,6 +469,23 @@
     }
 
     requestAnimationFrame(draw);
+  }
+
+  function trackingText() {
+    if (!latestStatus || latestStatus.tracking === undefined) return "--";
+    const raw = latestStatus.tracking;
+    const eff = latestStatus.effectiveTracking !== undefined ? latestStatus.effectiveTracking : raw;
+    const name = kTrackingNames[eff] !== undefined ? kTrackingNames[eff] : ("status " + eff);
+    if (eff !== raw) return name + " (raw " + raw + ", markerless window " + markerlessRun + "/3)";
+    return name + " (" + raw + ")";
+  }
+
+  function coverageText() {
+    if (coverageSeen.size === 0) return "--";
+    let visited = 0;
+    for (const key of coverageSeen) if (coverageVisited.has(key)) visited++;
+    const pct = (100 * visited) / coverageSeen.size;
+    return pct.toFixed(0) + "% covered, " + underCount + " under-covered pts";
   }
 
   function avgLatency() {
@@ -421,6 +507,8 @@
       '<span class="label">data</span>     <span class="value">' + dataFps.toFixed(1) + " fps</span>\n" +
       '<span class="label">render</span>   <span class="value">' + renderFps.toFixed(1) + " fps</span>\n" +
       '<span class="label">points</span>   <span class="value">' + pointCount + "</span>\n" +
+      '<span class="label">coverage</span> <span class="value">' + coverageText() + "</span>\n" +
+      '<span class="label">tracking</span> <span class="value">' + trackingText() + "</span>\n" +
       '<span class="label">frame</span>    <span class="value">#' + lastFrameId + "</span>";
   }
 
