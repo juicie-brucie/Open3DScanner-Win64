@@ -1,0 +1,37 @@
+=== appstate experiment | 2026-10-19 | room C:\Users\Bruce\Documents\Github\Open3DScanner-Win64-wt-hw | branch hw/win-appstate | base ea740c2 ===
+Command-output transcript; no live run was performed.
+
+Premise check (dispatcher state: device attached, CrealityScan open):
+  present VID_2BC5 at 15:55:08: 0
+  non-present VID_2BC5 nodes (registry):
+    USB\VID_2BC5&PID_0C03\CR0886100SN           USB Composite Device        Present=False
+    USB\VID_2BC5&PID_0C03&MI_00\9&1697A0B6&0&0000  Creality Raptor Pro Depth Camera  Present=False
+    USB\VID_2BC5&PID_0C03&MI_02\9&1697A0B6&0&0002  Creality Raptor Pro IR Camera     Present=False
+    USB\VID_2BC5&PID_0C03&MI_04\9&1697A0B6&0&0004  Creality Raptor Pro RGB Camera    Present=False
+    USB\VID_2BC5&PID_0C03&MI_06\9&1697A0B6&0&0006  USB Input Device                  Present=False
+    HID\VID_2BC5&PID_0C03&MI_06\A&29767AEE&0&0000  HID-compliant device              Present=False
+  now: 2026-10-19 15:55:08
+
+Daemon state with app open:
+  CrealityScan pid=24332 responding=True started=10/19/2026 15:39:36 mainWindow=1836650 title='CrealityScan'
+
+Graceful UI close:
+  CloseMainWindow sent: True
+  exited within 15s: False
+  after close: pid=24332 responding=True mainWindow=1836650 title='CrealityScan'
+  present VID_2BC5 after close: 0
+
+Forced close (to complete the daemon-survival probe; no scan active):
+  force-closing pid=24332
+  CrealityScan process gone
+  other Creality/Orbbec processes: (none)
+
+Reopen:
+  reopened pid=6476 responding=True mainWindow=591078 title='CrealityScan'
+  present VID_2BC5 after reopen: 0
+
+Decision:
+  Device not enumerated -> the live path cannot start; no scan_server --live run.
+  Daemon host is the CrealityScan process (no Creality/Orbbec process survives the app),
+  so an app-closed live trial is not viable; stopped per step 6.
+  No crash, no WER/event sweep for this window.
