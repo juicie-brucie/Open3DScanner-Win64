@@ -90,6 +90,24 @@ $gitDir = Split-Path -Parent $gitBin
 if (Test-Path -LiteralPath $gitDir) { $env:PATH = "$gitDir;$env:PATH" }
 $GhBin = if ($env:GH_BIN) { $env:GH_BIN } else { 'C:\Users\Bruce\tools\gh\gh.exe' }
 
+# --- repo from git, not from gh's inference -----------------------------------
+# This clone has two remotes: origin = the fork, upstream = the parent (the
+# charter requires upstream). gh prefers upstream, so a bare `gh pr view` here
+# silently targets the PARENT repo - same PR number, different state. Derive
+# owner/name from `git remote get-url origin` (as scripts/verify-pr.py does) and
+# make every gh call explicit via GH_REPO. Do NOT rely on gh picking the repo.
+function Get-RepoFromRemote {
+  try { $url = (& $script:gitBin remote get-url origin 2>$null) -join '' } catch { return '' }
+  if ($url -match 'github\.com[:/]+([^/]+/[^/]+?)(?:\.git)?$') { return $Matches[1] }
+  return ''
+}
+$Repo = Get-RepoFromRemote
+if (-not $Repo) {
+  [Console]::Error.WriteLine('watch-sessions: cannot resolve the fork repo from `git remote get-url origin`; set GH_REPO explicitly')
+  exit 2
+}
+$env:GH_REPO = $Repo
+
 # --- auth: read at runtime, never echoed, never on a command line -------------
 $serviceCandidates = New-Object System.Collections.Generic.List[string]
 if ($env:OPENCODE_SERVICE) { $serviceCandidates.Add($env:OPENCODE_SERVICE) }
@@ -227,11 +245,9 @@ function Watch-Session([string]$Id) {
 # --- PR watcher ---------------------------------------------------------------
 function Watch-PR([string]$N) {
   $deadline = (Get-Date).AddSeconds($Timeout)
-  $repo = ''
-  $rv = Invoke-Gh @('repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner')
-  if ($rv.Code -eq 0) { $repo = $rv.Text.Trim() }
+  $repo = $script:Repo
   while ($true) {
-    $v = Invoke-Gh @('pr', 'view', $N, '--json', 'state,mergeStateStatus,headRefOid,autoMergeRequest,url')
+    $v = Invoke-Gh @('pr', 'view', $N, '--repo', $repo, '--json', 'state,mergeStateStatus,headRefOid,autoMergeRequest,url')
     if ($v.Code -ne 0 -or [string]::IsNullOrWhiteSpace($v.Text)) {
       [Console]::Out.WriteLine("[pr] #${N}: not found or not readable")
       return 1
@@ -263,7 +279,7 @@ function Watch-PR([string]$N) {
         }
       }
     }
-    $chk = Invoke-Gh @('pr', 'checks', $N, '--json', 'state', '--jq', '[.[]|select(.state=="FAILURE")]|length')
+    $chk = Invoke-Gh @('pr', 'checks', $N, '--repo', $repo, '--json', 'state', '--jq', '[.[]|select(.state=="FAILURE")]|length')
     $fails = if ($chk.Code -eq 0 -and $chk.Text) { $chk.Text.Trim() } else { '0' }
     if ($fails -ne '0' -and $fails -ne '') { [Console]::Out.WriteLine("[pr] #${N}: $fails check(s) failing"); return 0 }
     if ((Get-Date) -ge $deadline) { [Console]::Out.WriteLine("[pr] #${N}: TIMEOUT (state=$state)"); return 1 }
