@@ -226,7 +226,7 @@ int RunTests(const std::string& library_path) {
     std::string scan_log_dir = TempLogDir("openscanner_ob_scan_log");
     std::string fps_log_dir = TempLogDir("openscanner_fps_log");
     ObScanContextConfig config = {};
-    config.input_algo_dependent_files_dir = streaming_assets.empty() ? nullptr : streaming_assets.c_str();
+    config.input_algo_dependent_files_dir = streaming_assets.c_str();
     config.output_ob_sdk_log_dir = sdk_log_dir.c_str();
     config.output_ob_scan_log_dir = scan_log_dir.c_str();
     config.output_computer_performance_fps_dir = fps_log_dir.c_str();
