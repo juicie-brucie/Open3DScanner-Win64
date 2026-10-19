@@ -36,6 +36,11 @@ public:
     // concurrent Start().
     void SetTextMessageHandler(TextMessageHandler handler);
 
+    // Serves the UI from `dir` on the same port (a non-WebSocket request
+    // gets a static file instead of the 101 handshake). Empty disables it.
+    // Call before Start(); not thread-safe against a concurrent Start().
+    void SetStaticRoot(const std::string& dir);
+
     // Starts listening on 0.0.0.0:port (all interfaces) and accepting
     // client connections on a background thread. Returns false if the
     // socket couldn't be bound (port already in use, etc.).

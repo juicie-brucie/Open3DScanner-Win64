@@ -741,8 +741,46 @@ typedef ObScanStatus (*fn_obscan_scan_config_rgb_fill_light)(ObScanScanHandle sc
 typedef ObScanStatus (*fn_obscan_scan_config_show_data_rotate)(ObScanScanHandle scan, bool enabled);
 typedef ObScanStatus (*fn_obscan_scan_config_light_type)(ObScanScanHandle scan, ObScanLightType light_type);
 typedef ObScanStatus (*fn_obscan_scan_reconfig_scan_mode_config)(ObScanScanHandle scan, const ObScanModeConfig* config);
-// `obscan_scan_config_manaul_remove_plane` exists but its C argument order is
-// not yet recovered (native: (bool, OBScanPlane_&, int&) — findings OQ-S14).
+// ---------------------------------------------------------------------------
+// The plane-removal surface (rows #58/#59; findings plane-removal.md). The
+// three toggles are live-callable at any step (the wrappers check only the
+// scan handle); their state lives on the data-management subobject at
+// scan+0xf0 (enabled@+0x4f, the plane@+0x50). `obscan_scan_get_manaul_remove_plane`
+// takes a different 0x18-byte struct — now declared below as
+// ObScanManualRPPoints (row #70; findings §4).
+typedef struct ObScanPlane {
+    float a;            // 0x00
+    float b;            // 0x04
+    float c;            // 0x08
+    float d;            // 0x0c — the plane equation a·x + b·y + c·z + d = 0
+} ObScanPlane;          // 16 bytes
+
+typedef struct ObScanManualRPConfig {
+    int32_t state;      // 0x00 — read by the native (== 2 on one path)
+    bool enabled;       // 0x04
+    /* 0x05..0x07 pad */
+    ObScanPlane plane;  // 0x08
+} ObScanManualRPConfig; // 0x18 bytes
+
+typedef ObScanStatus (*fn_obscan_scan_plane_remove)(ObScanScanHandle scan, bool enabled);
+typedef ObScanStatus (*fn_obscan_scan_turntable_plane_remove)(ObScanScanHandle scan, bool enabled);
+typedef ObScanStatus (*fn_obscan_scan_config_manaul_remove_plane)(ObScanScanHandle scan, const ObScanManualRPConfig* config);
+
+// The manual-plane GETTER (row #70; findings plane-removal.md §4): its argument
+// is the SDK's own OBScanManualRPConfig_ — the same 0x18 bytes as
+// ObScanManualRPConfig above but a DIFFERENT shape: a {pointer, count} view of
+// the manual plane's defining points (16-byte {x,y,z,pad} records, scaled
+// x1000 when read). The two exports' structs are not interchangeable despite
+// the shared size. The native fills *out_plane (an ObScanPlane, 16 bytes)
+// derived from those points.
+typedef struct ObScanManualRPPoints {
+    uint32_t _reserved0;  // 0x00 — unread by the getter's native
+    uint32_t _reserved1;  // 0x04
+    const void* points;   // 0x08 — 16-byte {x,y,z,pad} records
+    uint32_t count;       // 0x10
+    uint32_t _reserved2;  // 0x14
+} ObScanManualRPPoints;   // 0x18 bytes
+typedef ObScanStatus (*fn_obscan_scan_get_manaul_remove_plane)(ObScanScanHandle scan, const ObScanManualRPPoints* config, ObScanPlane* out_plane);
 
 // ---------------------------------------------------------------------------
 // Frame and image payloads — the read side of the listener live path.
@@ -841,6 +879,12 @@ OBSCAN_ABI_ASSERT(sizeof(ObScanDistanceAdviceInfo) == 328, "ObScanDistanceAdvice
 OBSCAN_ABI_ASSERT(offsetof(ObScanDistanceAdviceInfo, pair_second) == 0x04 &&
                   offsetof(ObScanDistanceAdviceInfo, histogram) == 0x08,
                   "ObScanDistanceAdviceInfo offsets (findings §15)");
+OBSCAN_ABI_ASSERT(sizeof(ObScanPlane) == 16, "ObScanPlane must be 16 bytes (findings plane-removal.md §4)");
+OBSCAN_ABI_ASSERT(sizeof(ObScanManualRPPoints) == 0x18, "ObScanManualRPPoints must be 0x18 bytes (findings plane-removal.md §4)");
+OBSCAN_ABI_ASSERT(offsetof(ObScanManualRPPoints, points) == 0x08 && offsetof(ObScanManualRPPoints, count) == 0x10,
+                  "ObScanManualRPPoints offsets (findings plane-removal.md §4)");
+OBSCAN_ABI_ASSERT(offsetof(ObScanManualRPConfig, plane) == 0x08, "ObScanManualRPConfig offsets (findings plane-removal.md §4)");
+OBSCAN_ABI_ASSERT(sizeof(ObScanManualRPConfig) == 0x18, "ObScanManualRPConfig must be 0x18 bytes (findings plane-removal.md §4)");
 OBSCAN_ABI_ASSERT(sizeof(ObScanPose) == 128, "ObScanPose must be 128 bytes (findings §17)");
 OBSCAN_ABI_ASSERT(offsetof(ObScanPose, m[0][3]) == 0x18 &&
                   offsetof(ObScanPose, m[1][3]) == 0x38 &&
@@ -859,6 +903,18 @@ OBSCAN_ABI_ASSERT(offsetof(ObScanPose, m[0][3]) == 0x18 &&
 // solve. See docs/recon/findings/scan-live-data.md §17.
 typedef ObScanStatus (*fn_obscan_scan_get_global_pose)(ObScanScanHandle scan, ObScanPose* out_pose);
 typedef ObScanStatus (*fn_obscan_scan_get_registration_pose)(ObScanScanHandle scan, ObScanPose* out_pose);
+
+// The registration family's pose path (row #60; findings §17.2). The flow:
+// create a registration from the session, run it (the runners are not declared
+// here), then confirm — which publishes the scan's registration pose as the
+// global pose — and destroy it. All three reject a NULL handle with
+// OB_SCAN_ERROR_DEADLINE_EXCEEDED (845283591). For a live per-frame pose, the
+// registration getter above is the channel; the global getter changes only on
+// a confirmed result.
+typedef void* ObScanRegistrationHandle;   // opaque; wraps the SDK's object
+typedef ObScanStatus (*fn_obscan_session_create_registration)(ObScanSessionHandle session, ObScanRegistrationHandle* out_registration);
+typedef ObScanStatus (*fn_obscan_registration_confirm_or_cancel_result)(ObScanRegistrationHandle registration, bool confirm);
+typedef ObScanStatus (*fn_obscan_registration_destroy)(ObScanRegistrationHandle registration);
 typedef ObScanStatus (*fn_obscan_scan_get_markers)(ObScanScanHandle scan, ObScanMarkers* out_markers);
 
 // Fills *out_cloud with a pointer to the SDK's frame cloud — the same
@@ -868,6 +924,20 @@ typedef ObScanStatus (*fn_obscan_frame_get_frame_bbox)(ObScanFrameHandle frame, 
 typedef ObScanStatus (*fn_obscan_frame_get_timestamp)(ObScanFrameHandle frame, int64_t* out_timestamp);
 typedef ObScanStatus (*fn_obscan_frame_get_frame_id)(ObScanFrameHandle frame, int32_t* out_frame_id);
 typedef ObScanStatus (*fn_obscan_frame_get_frame_rate)(ObScanFrameHandle frame, int32_t* out_frame_rate);
+// OBScan.SDK.OBScanTrackingStatus — the value returned by the getter below
+// (row #78; findings scan-quality-gate.md §2). The mapping is the vendor's own:
+// OBScanTrackingStatus_name (0x170d64) bounds-checks <= 6 and loads a 7-entry
+// table (0x45455b0; descs 0x45455e8); out of range is "UNKNOWN".
+typedef enum ObScanTrackingStatus {
+    OB_SCAN_TRACKING_SUCCESS = 0,                        // "tracking success"
+    OB_SCAN_TRACKING_LOST = 1,                           // "tracking lost"
+    OB_SCAN_TRACKING_AMBIGUOUS_PLANE = 2,                // "ambiguous plane"
+    OB_SCAN_TRACKING_FAILURE_INSUFF_VALID_POINTS = 3,    // "insufficient valid points"
+    OB_SCAN_TRACKING_FAILURE_TEXTURELESS = 4,            // "textureless"
+    OB_SCAN_TRACKING_FAILURE_MARKERLESS = 5,             // "markerless failure"
+    OB_SCAN_TRACKING_FAILURE_MOVING_TOO_FAST = 6,        // "moving too fast"
+} ObScanTrackingStatus;
+
 typedef ObScanStatus (*fn_obscan_frame_get_frame_tracking_status)(ObScanFrameHandle frame, int32_t* out_status);
 typedef ObScanStatus (*fn_obscan_frame_get_update_model)(ObScanFrameHandle frame, bool* out_update_model);
 typedef ObScanStatus (*fn_obscan_frame_get_frame_pose)(ObScanFrameHandle frame, ObScanPose** out_pose);

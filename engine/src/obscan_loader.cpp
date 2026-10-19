@@ -102,6 +102,16 @@ ObscanLibrary::ObscanLibrary(const std::string& library_path) {
     obscan_scan_stop = reinterpret_cast<fn_obscan_scan_stop>(resolve("obscan_scan_stop"));
     obscan_scan_get_raw_cloud =
         reinterpret_cast<fn_obscan_scan_get_raw_cloud>(resolve("obscan_scan_get_raw_cloud"));
+    obscan_frame_get_frame_tracking_status = reinterpret_cast<fn_obscan_frame_get_frame_tracking_status>(
+        resolve("obscan_frame_get_frame_tracking_status"));
+    obscan_frame_release =
+        reinterpret_cast<fn_obscan_frame_release>(resolve("obscan_frame_release"));
+    obscan_scan_plane_remove =
+        reinterpret_cast<fn_obscan_scan_plane_remove>(resolve("obscan_scan_plane_remove"));
+    obscan_scan_turntable_plane_remove =
+        reinterpret_cast<fn_obscan_scan_turntable_plane_remove>(resolve("obscan_scan_turntable_plane_remove"));
+    obscan_scan_config_manaul_remove_plane = reinterpret_cast<fn_obscan_scan_config_manaul_remove_plane>(
+        resolve("obscan_scan_config_manaul_remove_plane"));
     obscan_scan_get_global_pose =
         reinterpret_cast<fn_obscan_scan_get_global_pose>(resolve("obscan_scan_get_global_pose"));
     obscan_scan_get_registration_pose =
