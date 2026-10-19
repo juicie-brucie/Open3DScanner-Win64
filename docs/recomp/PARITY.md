@@ -12,6 +12,10 @@ trusted. A row whose record is missing is a gap, not a parity claim.
 
 Read at: fork `main` @ `a37205b`; parent `main` @ `2cf83f2`; parent tree `7537e44`.
 
+Re-read 2026-10-19 after the round: fork `main` @ `6f21847`; parent `main` @ `900a746`.
+The per-row refs below are unchanged: the consumed parent tree is still `7537e44` and the
+header pin is still `1ace2dc8`. Parent `main` moving past `2cf83f2` does not move either.
+
 | Area | Source of truth | Record |
 | --- | --- | --- |
 | contract header | parent | parent `7537e44`; blob `9c73210f`; sha256 `1ace2dc8…` — the fork's copy is the **same blob**, byte-identical (57 183 B). Pin: `FORK-COORDINATION.md` §2. `--pincheck` hashes the **committed blob** (`git cat-file blob`), never the working file. |
