@@ -8,6 +8,7 @@
 #include <windows.h>
 #else
 #include <dlfcn.h>
+#include <sys/stat.h>
 #endif
 
 namespace openscanner {
@@ -44,12 +45,13 @@ std::string LastErrorMessage() {
 #endif
 
 bool PathExists(const std::string& path) {
-    FILE* f = std::fopen(path.c_str(), "rb");
-    if (f != nullptr) {
-        std::fclose(f);
-        return true;
-    }
-    return false;
+#if defined(_WIN32)
+    const DWORD attrs = GetFileAttributesA(path.c_str());
+    return attrs != INVALID_FILE_ATTRIBUTES;
+#else
+    struct stat st;
+    return ::stat(path.c_str(), &st) == 0;
+#endif
 }
 
 }  // namespace
