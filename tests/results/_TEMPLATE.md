@@ -42,7 +42,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File <script or target>
      exact sentence it printed. Windows has no .ips; the sweep matches the report's
      own fields (AppName/AppPath + time) across WER ReportArchive and the
      Application event log (EventID 1000), and archives <slug>.wer (+ optional
-     <slug>.hdmp) or <slug>.event.txt. If neither source yields a report it prints
+     <slug>.hdmp) or <slug>.event.log. If neither source yields a report it prints
      exactly: no Windows crash-report source available - sweep not performed -->
 <the postflight line>
 

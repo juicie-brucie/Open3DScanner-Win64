@@ -41,11 +41,13 @@ All from the room root, strictly one process at a time; CrealityScan stayed open
 | 3 | Data/process listener test, CrealityScan open (pid 24332) | **FAIL** — same init failure; exit 1 |
 | 4 | Synthetic `GET /` | **PASS** — `200 text/html; charset=utf-8`, 3593 bytes |
 | 5 | Synthetic WebSocket | **PASS** — `Open` (101 handshake) |
-| 6 | Live smoke reaches serving/streaming | **PASS** — `obscan_scan_start -> OB_SCAN_SUCCESS`; 45 `FRAME_READY` lines; frames on `ws://0.0.0.0:8787` |
+| 6 | Live smoke reaches serving/streaming | **PASS** - `obscan_scan_start -> OB_SCAN_SUCCESS`; 44 `FRAME_READY` lines; frames on `ws://0.0.0.0:8787` |
 | 7 | Live smoke stability | **FAIL** — vendor worker crashed, `0xC0000005`, fault module `lib_orbbec_scan.dll` |
 | 8 | `[perf] window` lines | **N/A** — 0 lines before the crash; no perf window emitted |
 | 9 | HUD `data`/`render` fps | **N/A** — browser not opened; live crashed before a page session |
 | 10 | Crash sweep (WER + Event Log 1000) | **PASS** — both sources yielded reports; archived below |
+
+The preflight PASS above is also captured in the raw log under `=== preflight re-run for capture ===` (exit 0).
 
 ### Device listener test — exact output (CrealityScan open)
 
@@ -110,15 +112,15 @@ Started at ~15:42:58 (vendor `GVCPClient` bind). It reached `obscan_scan_start -
 [launcher] Worker crashed or timed out inside the vendor SDK (child crashed, exit code 0xC0000005).
 ```
 
-- 45 `FRAME_READY` lines; 1 `tracking_status=1 (LOST)`; **0** `[perf] window` lines.
+- 44 `FRAME_READY` lines; 1 `tracking_status=1 (LOST)`; **0** `[perf] window` lines.
 - The parent process had exited by the 35 s check; no leftover `scan_server`.
 - WER: `AppName=scan_server.exe`, `AppPath=C:\Users\Bruce\Documents\Github\Open3DScanner-Win64-wt-hw\build\tools\scan_server\scan_server.exe`, fault module `lib_orbbec_scan.dll` version `3.5.3.921`, exception `c0000005`, offset `0000000000872677`, event time 15:43:01.
 - HUD fps: not captured (browser not opened).
 
 ## Crash sweep
 
-- Event log: [`2026-10-19-win-hw-learning-smoke.event.txt`](./2026-10-19-win-hw-learning-smoke.event.txt), sha256 `a42e2c60d61e40d566c7647161bc457b79656b077e97e61d01c1e6355e16710e` (Application Error, EventID 1000; faulting application `scan_server.exe`, faulting module `lib_orbbec_scan.dll` 3.5.3.921, exception `0xc0000005`).
-- WER: [`2026-10-19-win-hw-learning-smoke.wer`](./2026-10-19-win-hw-learning-smoke.wer), sha256 `1b4340321c26cc3489cbbaeb192c02467206bf6970bdf7869c9d1d42944c5ce6`; no `.hdmp` accompanied the report.
+- Event log: [`2026-10-19-win-hw-learning-smoke.event.log`](./2026-10-19-win-hw-learning-smoke.event.log), sha256 `a33b1a657165032cf5b317473e3e25ff25f44aa2a2f5908347d4699991dcb131` (committed blob; Application Error, EventID 1000; faulting application `scan_server.exe`, faulting module `lib_orbbec_scan.dll` 3.5.3.921, exception `0xc0000005`).
+- WER: [`2026-10-19-win-hw-learning-smoke.wer`](./2026-10-19-win-hw-learning-smoke.wer), sha256 `1b4340321c26cc3489cbbaeb192c02467206bf6970bdf7869c9d1d42944c5ce6` (committed blob); no `.hdmp` accompanied the report.
 - The postflight matched both sources and archived the earliest (the event); the WER report was copied beside it as above. Neither source was unavailable, so the "sweep not performed" sentence does not apply.
 
 ## Findings / lead
