@@ -65,6 +65,7 @@ function Show-Help {
     ForEach-Object { $_ -replace '^#\s?', '' }
 }
 
+$VerdictSelftest = $false
 $i = 0
 while ($i -lt $args.Count) {
   $a = [string]$args[$i]
@@ -74,6 +75,7 @@ while ($i -lt $args.Count) {
     '--grace'    { $i++; if ($i -ge $args.Count) { break }; $Grace    = [int]$args[$i] }
     '--base'     { $i++; if ($i -ge $args.Count) { break }; $Base     = [string]$args[$i] }
     '--child'    { $Child = $true }
+    '--verdict-selftest' { $VerdictSelftest = $true }
     '-h'         { Show-Help; exit 0 }
     '--help'     { Show-Help; exit 0 }
     default {
@@ -91,11 +93,10 @@ if (Test-Path -LiteralPath $gitDir) { $env:PATH = "$gitDir;$env:PATH" }
 $GhBin = if ($env:GH_BIN) { $env:GH_BIN } else { 'C:\Users\Bruce\tools\gh\gh.exe' }
 
 # --- repo from git, not from gh's inference -----------------------------------
-# This clone has two remotes: origin = the fork, upstream = the parent (the
-# charter requires upstream). gh prefers upstream, so a bare `gh pr view` here
-# silently targets the PARENT repo - same PR number, different state. Derive
-# owner/name from `git remote get-url origin` (as scripts/verify-pr.py does) and
-# make every gh call explicit via GH_REPO. Do NOT rely on gh picking the repo.
+# This clone has two remotes: origin = the fork, parent = the parent repo (renamed
+# from `upstream` so gh no longer treats it as a fork base and mis-targets it).
+# Derive owner/name from `git remote get-url origin` (as scripts/verify-pr.py
+# does) and make every gh call explicit via GH_REPO. Do NOT rely on gh inference.
 function Get-RepoFromRemote {
   try { $url = (& $script:gitBin remote get-url origin 2>$null) -join '' } catch { return '' }
   if ($url -match 'github\.com[:/]+([^/]+/[^/]+?)(?:\.git)?$') { return $Matches[1] }
@@ -194,6 +195,56 @@ function Invoke-Gh([string[]]$GhArgs) {
   return @{ Code = $LASTEXITCODE; Text = ($out -join "`n") }
 }
 
+# --- verdict decision ---------------------------------------------------------
+# Decide the verdict state from a PR's issue comments. Returns:
+#   @{ Kind='match'; Verdict=...; Sha=... }   a verdict naming the current head
+#   @{ Kind='stale'; Verdict=...; Sha=... }   a verdict naming a different head
+#   @{ Kind='none' }                          no verdict comment at all
+#   @{ Kind='error'; Detail=... }             the lookup could not be read/parsed
+#
+# Parses JSON with ConvertFrom-Json, NEVER by passing a `--jq` filter with
+# embedded double quotes through a native call: PowerShell 5.1 strips those
+# quotes, gh receives invalid jq, and the failure was indistinguishable from "no
+# verdict". 'error' is a distinct outcome so a broken lookup can never read as an
+# empty result.
+function Get-VerdictDecision([string]$CommentsJson, [string]$Head) {
+  $comments = $null
+  try { $comments = $CommentsJson | ConvertFrom-Json } catch { return @{ Kind = 'error'; Detail = 'comment JSON did not parse' } }
+  $verdicts = @($comments | Where-Object { $_ -and $_.body -and ([string]$_.body).StartsWith('VERDICT:') })
+  if ($verdicts.Count -eq 0) { return @{ Kind = 'none' } }
+  $first = (([string]$verdicts[-1].body) -split "`n")[0].Trim()
+  $m = [regex]::Match($first, '^VERDICT:\s*(MERGEABLE|NEEDS CHANGE)\s*@\s*([0-9a-f]{40})')
+  if (-not $m.Success) { return @{ Kind = 'error'; Detail = "last verdict comment is not a well-formed anchored line: $first" } }
+  $verdict = $m.Groups[1].Value.Trim()
+  $sha = $m.Groups[2].Value
+  if ($sha -ne $Head) { return @{ Kind = 'stale'; Verdict = $verdict; Sha = $sha } }
+  return @{ Kind = 'match'; Verdict = $verdict; Sha = $sha }
+}
+
+function Invoke-VerdictSelftest {
+  $HEAD = 'a' * 40
+  $STALE = 'b' * 40
+  $cases = @(
+    @{ name = 'matching NEEDS CHANGE -> match';        json = "[{`"body`":`"VERDICT: NEEDS CHANGE @ $HEAD`"}]";             head = $HEAD;  want = 'match' },
+    @{ name = 'matching MERGEABLE -> match';           json = "[{`"body`":`"VERDICT: MERGEABLE @ $HEAD`"}]";                 head = $HEAD;  want = 'match' },
+    @{ name = 'stale verdict -> stale';                json = "[{`"body`":`"VERDICT: MERGEABLE @ $STALE`"}]";                head = $HEAD;  want = 'stale' },
+    @{ name = 'no comments -> none';                   json = '[]';                                                       head = $HEAD;  want = 'none' },
+    @{ name = 'comments without a verdict -> none';    json = '[{"body":"just a review"}]';                              head = $HEAD;  want = 'none' },
+    @{ name = 'malformed JSON -> error (loud)';        json = 'not json';                                                 head = $HEAD;  want = 'error' },
+    @{ name = 'starts with VERDICT: but malformed -> error'; json = '[{"body":"VERDICT: NEEDS CHANGE @ not-a-sha"}]'; head = $HEAD; want = 'error' },
+    @{ name = 'last verdict wins (earlier matches) -> match'; json = "[{`"body`":`"VERDICT: NEEDS CHANGE @ $STALE`"},{`"body`":`"VERDICT: MERGEABLE @ $HEAD`"}]"; head = $HEAD; want = 'match' }
+  )
+  $fail = 0
+  foreach ($c in $cases) {
+    $got = Get-VerdictDecision $c.json $c.head
+    $ok = ($got.Kind -eq $c.want)
+    if (-not $ok) { $fail++ }
+    [Console]::Out.WriteLine(("{0}  {1}  want={2} got={3}" -f $(if ($ok) { 'PASS' } else { 'FAIL' }), $c.name, $c.want, $got.Kind))
+  }
+  [Console]::Out.WriteLine("verdict selftest: $($cases.Count) cases, $(if ($fail) { 'FAIL' } else { 'ok' })")
+  return $(if ($fail) { 1 } else { 0 })
+}
+
 # --- session watcher ----------------------------------------------------------
 function Watch-Session([string]$Id) {
   $deadline = (Get-Date).AddSeconds($Timeout)
@@ -246,6 +297,7 @@ function Watch-Session([string]$Id) {
 function Watch-PR([string]$N) {
   $deadline = (Get-Date).AddSeconds($Timeout)
   $repo = $script:Repo
+  $staleLogged = $false
   while ($true) {
     $v = Invoke-Gh @('pr', 'view', $N, '--repo', $repo, '--json', 'state,mergeStateStatus,headRefOid,autoMergeRequest,url')
     if ($v.Code -ne 0 -or [string]::IsNullOrWhiteSpace($v.Text)) {
@@ -262,26 +314,47 @@ function Watch-PR([string]$N) {
     if ($state -eq 'MERGED' -or $state -eq 'CLOSED') { [Console]::Out.WriteLine("[pr] #${N}: $state"); return 0 }
     if ($mss -eq 'DIRTY') { [Console]::Out.WriteLine("[pr] #${N}: CONFLICTING with main - needs a rebase"); return 0 }
     if ($repo) {
-      $cq = Invoke-Gh @('api', "repos/$repo/issues/$N/comments", '--jq',
-        '[.[]|select(.body|startswith("VERDICT:"))]|last|.body')
-      $vline = ''
-      if ($cq.Code -eq 0 -and $cq.Text) { $vline = ($cq.Text -split "`n")[0] }
-      if ($vline -and $vline.Contains($head)) {
-        $verdict = ''
-        if ($vline -match '^VERDICT:\s*([A-Z ]+?)\s*@') { $verdict = $matches[1].Trim() }
-        if ($verdict -eq 'NEEDS CHANGE') {
-          [Console]::Out.WriteLine("[pr] #${N}: NEEDS CHANGE @ $($head.Substring(0, [Math]::Min(7, $head.Length))) - needs a fix")
-          return 0
+      $cq = Invoke-Gh @('api', "repos/$repo/issues/$N/comments", '--paginate')
+      if ($cq.Code -ne 0) {
+        [Console]::Out.WriteLine("[pr] #${N}: VERDICT LOOKUP FAILED (gh exit $($cq.Code)) - cannot tell whether a verdict exists")
+        return 1
+      }
+      $vd = Get-VerdictDecision $cq.Text $head
+      switch ($vd.Kind) {
+        'error' {
+          [Console]::Out.WriteLine("[pr] #${N}: VERDICT LOOKUP FAILED - $($vd.Detail)")
+          return 1
         }
-        if ($verdict -eq 'MERGEABLE' -and -not $armed) {
-          [Console]::Out.WriteLine("[pr] #${N}: MERGEABLE @ $($head.Substring(0, [Math]::Min(7, $head.Length))) but auto-merge is NOT armed - needs your action")
-          return 0
+        'stale' {
+          if (-not $staleLogged) {
+            [Console]::Out.WriteLine("[pr] #${N}: verdict names $($vd.Sha) but head is $head - stale, ignoring")
+            $staleLogged = $true
+          }
+        }
+        'match' {
+          if ($vd.Verdict -eq 'NEEDS CHANGE') {
+            [Console]::Out.WriteLine("[pr] #${N}: NEEDS CHANGE @ $($head.Substring(0, [Math]::Min(7, $head.Length))) - needs a fix")
+            return 0
+          }
+          if ($vd.Verdict -eq 'MERGEABLE' -and -not $armed) {
+            [Console]::Out.WriteLine("[pr] #${N}: MERGEABLE @ $($head.Substring(0, [Math]::Min(7, $head.Length))) but auto-merge is NOT armed - needs your action")
+            return 0
+          }
         }
       }
     }
-    $chk = Invoke-Gh @('pr', 'checks', $N, '--repo', $repo, '--json', 'state', '--jq', '[.[]|select(.state=="FAILURE")]|length')
-    $fails = if ($chk.Code -eq 0 -and $chk.Text) { $chk.Text.Trim() } else { '0' }
-    if ($fails -ne '0' -and $fails -ne '') { [Console]::Out.WriteLine("[pr] #${N}: $fails check(s) failing"); return 0 }
+    # checks: parse JSON in PowerShell, never a jq filter through a native call. A
+    # lookup that errors is REPORTED, not silently read as "no failing checks".
+    $chk = Invoke-Gh @('pr', 'checks', $N, '--repo', $repo, '--json', 'state')
+    $fails = 0
+    if ($chk.Code -ne 0) {
+      if ($chk.Text -match 'no checks reported') { $fails = 0 }
+      else { [Console]::Out.WriteLine("[pr] #${N}: CHECKS LOOKUP FAILED (gh exit $($chk.Code)) - cannot tell whether a check is failing") }
+    } elseif (-not [string]::IsNullOrWhiteSpace($chk.Text)) {
+      try { $fails = @(($chk.Text | ConvertFrom-Json) | Where-Object { $_.state -eq 'FAILURE' }).Count }
+      catch { [Console]::Out.WriteLine("[pr] #${N}: CHECKS LOOKUP FAILED - checks JSON did not parse"); $fails = 0 }
+    }
+    if ($fails -gt 0) { [Console]::Out.WriteLine("[pr] #${N}: $fails check(s) failing"); return 0 }
     if ((Get-Date) -ge $deadline) { [Console]::Out.WriteLine("[pr] #${N}: TIMEOUT (state=$state)"); return 1 }
     Start-Sleep -Seconds $Interval
   }
@@ -295,6 +368,8 @@ function Invoke-Item-Waiter([string]$Item) {
   [Console]::Error.WriteLine("watch-sessions: skipping unrecognized item: $Item")
   return 3
 }
+
+if ($VerdictSelftest) { exit (Invoke-VerdictSelftest) }
 
 if ($Items.Count -eq 0) {
   [Console]::Error.WriteLine('usage: watch-sessions.ps1 [--timeout S] [--interval S] [--grace S] [--base URL] <ses_... | PR#> ...')
@@ -345,7 +420,7 @@ foreach ($f in $files) {
     }
     if ($null -eq $line) { $line = '' }
     Write-Output ($line.TrimEnd("`r", "`n"))
-    if ($line -match 'TIMEOUT|not found') { $rc = 1 }
+    if ($line -match 'TIMEOUT|not found|FAILED') { $rc = 1 }
   }
 }
 Remove-Item -Recurse -Force -LiteralPath $work -ErrorAction SilentlyContinue
