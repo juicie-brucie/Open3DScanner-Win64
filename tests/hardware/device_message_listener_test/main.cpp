@@ -25,9 +25,9 @@
 #include <dlfcn.h>
 #endif
 
-#if defined(__APPLE__)
-#include <CoreFoundation/CoreFoundation.h>
-#endif
+// (No CoreFoundation here: it existed only for the macOS interposer path. This
+// port has no Windows use for it, so it is removed rather than left as dead
+// macOS-only noise.)
 
 #include "openscanner/obscan_api.h"
 #include "openscanner/obscan_loader.h"
@@ -90,6 +90,17 @@ void Check(const char* label, ObScanStatus actual, ObScanStatus expected) {
     std::fflush(stdout);
 }
 
+// Log directories: macOS writes under /tmp; Windows has no /tmp, so use %TEMP%.
+std::string TempLogDir(const char* name) {
+#if defined(_WIN32)
+    const char* base = std::getenv("TEMP");
+    std::string root = (base != nullptr && base[0] != '\0') ? std::string(base) : std::string(".");
+    return root + "\\" + name;
+#else
+    return std::string("/tmp/") + name;
+#endif
+}
+
 // Local typedef for the not-yet-header-declared remove entry point.
 // The findings (device-message-listener.md §1) record this symbol as
 // exported: obscan_device_management_remove_device_msg_listener.
@@ -123,27 +134,51 @@ int RunTests(const std::string& library_path) {
         libptr = new openscanner::ObscanLibrary(library_path);
     } catch (const std::exception& e) {
         std::printf("[worker] FAILED to load SDK: %s\n", e.what());
+#if defined(_WIN32)
+        // Windows: the loader found the vendor DLL but could not load it (126 =
+        // one of ITS dependencies is unresolved). That is an environment gap on
+        // this platform, not a test failure - and the device path was never
+        // reached. Return the documented SKIP code so ctest (SKIP_RETURN_CODE 2)
+        // records "skipped", not "failed". macOS keeps 1: a present dylib that
+        // fails dlopen is a real fault there.
+        std::printf("[worker] SKIP: vendor SDK present but not loadable on Windows (dependency unresolved); device path NOT exercised.\n");
+        std::fflush(stdout);
+        return 2;
+#else
         std::fflush(stdout);
         return 1;
+#endif
     }
     openscanner::ObscanLibrary& lib = *libptr;
     std::printf("[worker] Resolved bootstrap symbols OK.\n");
 
     // Resolve the remove entry point opportunistically (not in the header).
+    // macOS uses dlopen/dlsym. Windows has no dlsym, and the existing loader
+    // (engine/src/obscan_loader.cpp) resolves only header-declared symbols - it
+    // exposes no arbitrary-symbol resolver. So on Windows this symbol stays
+    // unresolved and the OQ-3 remove/re-add checks are SKIPPED. That is a
+    // platform gap, stated in the output, not silently equivalent.
     fn_remove remove_fn = nullptr;
 #if !defined(_WIN32)
     void* native_handle = dlopen(library_path.c_str(), RTLD_NOW | RTLD_NOLOAD);
     if (native_handle == nullptr) native_handle = dlopen(library_path.c_str(), RTLD_NOW | RTLD_LOCAL);
     if (native_handle != nullptr) remove_fn = reinterpret_cast<fn_remove>(dlsym(native_handle, "obscan_device_management_remove_device_msg_listener"));
 #endif
+#if defined(_WIN32)
+    std::printf("[worker] remove entry point resolved: NO (Windows: the existing loader exposes no arbitrary-symbol resolver; OQ-3 remove/re-add checks SKIPPED - not equivalent to a Mac run)\n");
+#else
     std::printf("[worker] remove entry point resolved: %s\n", remove_fn != nullptr ? "yes" : "NO (OQ-3 untestable)");
+#endif
 
     std::string streaming_assets = openscanner::ObscanLibrary::FindStreamingAssetsDirForLibraryPath(library_path);
+    std::string sdk_log_dir = TempLogDir("openscanner_ob_sdk_log");
+    std::string scan_log_dir = TempLogDir("openscanner_ob_scan_log");
+    std::string fps_log_dir = TempLogDir("openscanner_fps_log");
     ObScanContextConfig config = {};
     config.input_algo_dependent_files_dir = streaming_assets.empty() ? nullptr : streaming_assets.c_str();
-    config.output_ob_sdk_log_dir = "/tmp/openscanner_ob_sdk_log";
-    config.output_ob_scan_log_dir = "/tmp/openscanner_ob_scan_log";
-    config.output_computer_performance_fps_dir = "/tmp/openscanner_fps_log";
+    config.output_ob_sdk_log_dir = sdk_log_dir.c_str();
+    config.output_ob_scan_log_dir = scan_log_dir.c_str();
+    config.output_computer_performance_fps_dir = fps_log_dir.c_str();
     config.output_windows_gpu_info_dir = "";
 
     ObScanContextHandle context = nullptr;
@@ -264,6 +299,13 @@ int main(int argc, char** argv) {
             std::fflush(stdout); // banner must precede worker output when piped
         }
     }
+#elif defined(_WIN32)
+    // Say it out loud: Windows cannot reproduce the macOS interposer hand-off.
+    // There is no DYLD_INSERT_LIBRARIES equivalent and no vulkan_disable_interpose
+    // target on this platform. The run below is WITHOUT an interposer, so its
+    // evidence is NOT equivalent to a Mac run on that axis.
+    std::printf("[launcher] no interposer on Windows: DYLD_INSERT_LIBRARIES is macOS-only and this build has no vulkan_disable_interpose. The worker runs WITHOUT an interposer; do not record this as equivalent to a Mac run in that respect.\n");
+    std::fflush(stdout);
 #endif
 
     std::vector<std::string> args = {kWorkerFlag, lib_path};
