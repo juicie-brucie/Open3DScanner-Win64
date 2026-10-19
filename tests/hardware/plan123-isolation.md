@@ -13,7 +13,7 @@ never the device.
    daemon host (proxy check, not a service query).
 3. One SDK user: no `scan_server`, `device_message_listener_test`,
    `data_process_message_listener_test`, or `live_capture_test` is running.
-4. The Mac is not scanning; the cable is on this machine.
+4. The operator has scheduled the run and no other SDK user is active.
 5. Tree/build current: room `Open3DScanner-Win64-wt-hw`, branch `hw/win-ready`;
    `build\tools\scan_server\scan_server.exe` exists.
 6. The preflight passes **load asserted** + `daemon: running` (below). The
