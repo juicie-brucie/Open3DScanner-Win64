@@ -5,6 +5,10 @@ finding: it says how to take the measurement and what to write down. Evidence
 lives in `tests/results/**` after the run; semantics live in
 `docs/recon/findings/**`.*
 
+## Who runs this
+
+The operator executes the run from Claude Code. Agents prepare the tree/build, the preflight/readiness checks, and the record; they do not run the device tests. A run not executed by the operator is not a `win #113` record.
+
 ## The question
 
 The parent's UI reports **2–8 data fps** while the session requested 50 fps on IR

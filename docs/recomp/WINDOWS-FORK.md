@@ -148,6 +148,8 @@ so **the fork starts with no hardware backstop at all**. Before any Windows hard
 - Keep the parent's hard rules verbatim — one SDK user at a time, no power-cycle shortcuts, no
   retry after a timeout, capture the exit code and any crash report.
 
+**Hardware execution is operator-run.** The operator runs the hardware test binaries and any `scan_server` device run from Claude Code; that run is how the scanner's presence and placement are confirmed. Agents (builder, dispatcher, verifier) prepare the build, the preflight/readiness checks, the runbook, and the records, and verify the evidence — they do not launch a device test. The dispatcher must not dispatch a hardware run to a builder session. This lane has already paid for the alternative once: a learning smoke was dispatched to a builder and the operator's confirmation path was bypassed.
+
 ## 8. What the fork needs before its first build
 
 In order, each gating the next:
