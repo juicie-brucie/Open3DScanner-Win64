@@ -43,16 +43,124 @@ export const VENDOR_TOKENS = [
 // suffix (device_message_listener_test, data_process_message_listener_test).
 const LISTENER_TEST = /message_listener_test/i;
 
+// A listener test is only a violation when it is INVOKED, not when the name is
+// merely written in prose — so match it in unquoted command text only.
+function unquotedHasListener(text) {
+  const unquoted = String(text).replace(/"[^"]*"/g, " ").replace(/'[^']*'/g, " ");
+  return LISTENER_TEST.test(unquoted);
+}
+
 function containsAny(text, tokens) {
   const lower = String(text).toLowerCase();
   return tokens.some((token) => lower.includes(token.toLowerCase()));
 }
 
-// A PATH write that also names a module/interposer is DLL shadowing. A bare
-// PATH write is how every toolchain sets up (vcvars, a ninja directory), so it
-// is intentionally NOT blocked — see README "What this does not cover".
-const PATH_ASSIGN = /(path\s*=|\$env:path|%path%)/i;
-const MODULE_HINT = /(\.dll|interpos|orbbec|obscan)/i;
+// --- narrow rules: fire on intent, not on text --------------------------------
+// The first cut matched raw substrings anywhere in a command, which blocked
+// ordinary work: prepending a tool directory to PATH was indistinguishable from
+// DLL shadowing, and merely NAMING a vendor artifact (in a PR body, a commit
+// message, a findings doc) read as touching it. Both are false positives. The
+// rules below fire on an operation, not on text.
+
+// 1. PATH shadowing. Only the RIGHT-HAND SIDE of a PATH assignment is inspected —
+//    never the rest of the command — and only a module/interposer in the dirs
+//    being PREPENDED counts. Prepending tool dirs (gh, git, cmake, ninja, the
+//    JDK, vcvars) is the normal way to build PATH here and is allowed; prepending
+//    a dir that names a .dll/.so/.dylib or an interposer is shadowing. A bare
+//    prepend naming nothing module-like is not caught — see README.
+const PATH_ASSIGN_VALUE =
+  /(?:^|[\s;&|])(?:set\s+)?(?:path|\$env:path|%path%)\s*=\s*("([^"]*)"|'([^']*)'|([^\s;&|]+))/gi;
+const MODULE_IN_VALUE = /\.(?:dll|so|dylib)\b|interpos/i;
+
+function pathWriteShadowsModule(text) {
+  PATH_ASSIGN_VALUE.lastIndex = 0;
+  let m;
+  while ((m = PATH_ASSIGN_VALUE.exec(text)) !== null) {
+    const value = m[2] ?? m[3] ?? m[4] ?? "";
+    for (const raw of value.split(";")) {
+      const seg = raw.trim().replace(/^["']|["']$/g, "");
+      if (!seg) continue;
+      if (/^(?:%path%|\$env:path)$/i.test(seg)) continue; // the inherited PATH, not an added dir
+      if (MODULE_IN_VALUE.test(seg)) return true;
+    }
+  }
+  return false;
+}
+
+// 2. Vendor artifacts. For file tools (read/edit/write/patch) the input IS the
+//    operand, so naming a vendor path there is access. For a shell command the
+//    invariant is an operation ON the artifact: an unquoted, path-like vendor
+//    operand, or a file op/redirection whose operand is exactly a vendor path.
+//    A vendor name inside quoted prose (a PR body, a doc) is not access.
+const SHELL_SPLIT = /[;&|]{1,2}/;
+const REDIRECT = />>?\s*("[^"]*"|'[^']*'|\S+)/g;
+const FILE_VERB =
+  /\b(?:cp|copy|mv|move|ren|rename|rm|del|erase|remove-item|set-content|add-content|out-file|new-item|cat|type|get-content|gc|strings|dumpbin|xxd|notepad)\b/gi;
+
+function stripQuotes(word) {
+  return String(word).trim().replace(/^["'`]+|["'`]+$/g, "");
+}
+
+// A whole operand that IS a vendor path — has a path separator, a module
+// extension, or is the .recon-cache directory. Prose (embedded spaces) is not.
+function vendorOperand(word) {
+  const w = stripQuotes(word);
+  if (!w || /\s/.test(w)) return false;
+  if (!containsAny(w, VENDOR_TOKENS)) return false;
+  return /[\\/]/.test(w) || /\.(?:dll|so|dylib)$/i.test(w) || /^\.recon-cache/i.test(w);
+}
+
+// Operands of a shell string, with quoted spans kept whole.
+function shellOperands(text) {
+  const out = [];
+  const re = /"[^"]*"|'[^']*'|\S+/g;
+  let m;
+  while ((m = re.exec(text)) !== null) out.push(m[0]);
+  return out;
+}
+
+function shellTouchesVendor(text) {
+  const command = String(text);
+  // (a) an UNQUOTED, path-like vendor operand (cat .recon-cache/x, > lib.dll).
+  const unquoted = command.replace(/"[^"]*"/g, " ").replace(/'[^']*'/g, " ");
+  for (const word of unquoted.split(/\s+/)) {
+    if (vendorOperand(word)) return true;
+  }
+  // (b) a file op / redirection whose operand is exactly a vendor path (quotes ok).
+  for (const part of command.split(SHELL_SPLIT)) {
+    REDIRECT.lastIndex = 0;
+    let r;
+    while ((r = REDIRECT.exec(part)) !== null) {
+      if (vendorOperand(r[1])) return true;
+    }
+    FILE_VERB.lastIndex = 0;
+    let v;
+    while ((v = FILE_VERB.exec(part)) !== null) {
+      const rest = part.slice(v.index + v[0].length);
+      for (const operand of shellOperands(rest)) {
+        if (vendorOperand(operand)) return true;
+      }
+    }
+  }
+  return false;
+}
+
+// The path operands of a file tool's input (excludes patterns/urls, which name
+// what to search for, not a file to touch).
+function pathOperands(input) {
+  const out = [];
+  if (input && typeof input === "object") {
+    for (const key of ["filePath", "file_path", "path"]) {
+      if (typeof input[key] === "string") out.push(input[key]);
+    }
+    for (const key of ["filePaths", "paths"]) {
+      if (Array.isArray(input[key])) {
+        for (const value of input[key]) if (typeof value === "string") out.push(value);
+      }
+    }
+  }
+  return out;
+}
 
 // Pull every string a tool call carries that could name a path or a command.
 export function candidateTexts(tool, input) {
@@ -90,30 +198,54 @@ export function evaluate(tool, input, cwd, room = DEFAULT_ROOM) {
   const name = String(tool || "").toLowerCase();
   const isShell = name === "shell" || name === "bash";
   const texts = candidateTexts(tool, input);
+  const roomRe = new RegExp(String(room).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+  const roomInCwd = typeof cwd === "string" && roomRe.test(cwd);
 
-  for (const text of texts) {
-    if (containsAny(text, INJECTION_TOKENS)) {
-      return block(
-        `library injection is not allowed here ("${quote(text)}"); the tool launcher owns module resolution`,
-      );
-    }
-    if (isShell && PATH_ASSIGN.test(text) && MODULE_HINT.test(text)) {
-      return block(`a PATH-shadowed module/interposer is not allowed here ("${quote(text)}")`);
-    }
-    if (containsAny(text, VENDOR_TOKENS)) {
-      return block(
-        `vendor artifacts are read-only in this lane ("${quote(text)}") — see docs/recon/README.md`,
-      );
+  // Universal: the listener rule. It is DEFINED by being outside the room, so it
+  // cannot be gated on cwd being the room, and it is the one thing wrong
+  // everywhere: running the device test outside its room.
+  if (isShell) {
+    for (const text of texts) {
+      if (unquotedHasListener(text) && !roomRe.test(text) && !roomInCwd) {
+        return block(
+          `run listener tests only from the ${room} worktree, or name that worktree in the command`,
+        );
+      }
     }
   }
 
+  // Hardware-room rules: enforced only when the command's cwd IS the hardware
+  // room. Outside it the plugin is inert — the clean-room wall and the vendor
+  // boundary are carried by per-role permission denies, which fire on the
+  // ARTIFACT, never on prose about it (see README "Scope"). A text-level rule
+  // applied to a session that writes prose just teaches the agent to paraphrase.
+  if (!roomInCwd) return { block: false, reason: "" };
+
   if (isShell) {
-    const roomRe = new RegExp(String(room).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
-    const roomInCwd = typeof cwd === "string" && roomRe.test(cwd);
     for (const text of texts) {
-      if (LISTENER_TEST.test(text) && !roomRe.test(text) && !roomInCwd) {
+      if (containsAny(text, INJECTION_TOKENS)) {
         return block(
-          `run listener tests only from the ${room} worktree, or name that worktree in the command`,
+          `library injection is not allowed in the ${room} room ("${quote(text)}"); the tool launcher owns module resolution`,
+        );
+      }
+      if (pathWriteShadowsModule(text)) {
+        return block(
+          `a PATH-shadowed module/interposer is not allowed in the ${room} room ("${quote(text)}")`,
+        );
+      }
+      if (shellTouchesVendor(text)) {
+        return block(
+          `vendor artifacts are read-only in the ${room} room ("${quote(text)}") — see docs/recon/README.md`,
+        );
+      }
+    }
+  } else {
+    // File tools act ON the path they name; inside the room, naming a vendor
+    // artifact there is access.
+    for (const path of pathOperands(input)) {
+      if (containsAny(path, VENDOR_TOKENS)) {
+        return block(
+          `vendor artifacts are read-only in the ${room} room ("${quote(path)}") — see docs/recon/README.md`,
         );
       }
     }
@@ -126,127 +258,249 @@ export function evaluate(tool, input, cwd, room = DEFAULT_ROOM) {
 // must-allow cases. `cwd`, when present, is the shell tool's working directory;
 // the plugin half of the test injects it into the tool input, as the shell tool
 // would carry it.
+// The hardware room's cwd vs an ordinary room's cwd. The hardware rules are gated
+// on the former; the listener rule is universal (it is defined by being outside).
+const ROOM = "C:\\dev\\Open3DScanner-Win64-wt-hw";
+const OUT = "C:\\Users\\Bruce\\Documents\\Github\\Open3DScanner-Win64-build";
+
 export const MATRIX = [
-  // --- must block ---------------------------------------------------------
+  // --- must block IN THE ROOM: hardware rules, cwd = the hardware room -------
   {
-    name: "dll-search: SetDllDirectory",
+    name: "IN-ROOM block: SetDllDirectory",
     tool: "shell",
     input: { command: `powershell -c "[Dll]::SetDllDirectory('C:\\evil')"` },
+    cwd: ROOM,
     expect: "block",
   },
   {
-    name: "dll-search: PATH-shadowed interposer",
+    name: "IN-ROOM block: PATH-shadowed interposer",
     tool: "shell",
     input: { command: `$env:PATH = "C:\\evil\\interpose;$env:PATH"` },
+    cwd: ROOM,
     expect: "block",
   },
   {
-    name: "injection: DYLD_INSERT_LIBRARIES (macOS analogue)",
+    name: "IN-ROOM block: DYLD_INSERT_LIBRARIES (macOS analogue)",
     tool: "shell",
     input: { command: "DYLD_INSERT_LIBRARIES=/x ./run" },
+    cwd: ROOM,
     expect: "block",
   },
   {
-    name: "injection: LD_PRELOAD (Linux analogue)",
+    name: "IN-ROOM block: LD_PRELOAD (Linux analogue)",
     tool: "shell",
     input: { command: "LD_PRELOAD=./evil.so ./run" },
+    cwd: ROOM,
     expect: "block",
   },
   {
-    name: "vendor: read via shell",
+    name: "IN-ROOM block: vendor read via shell",
     tool: "shell",
     input: { command: "strings .recon-cache/vendor/libOrbbecSDK.dll" },
+    cwd: ROOM,
     expect: "block",
   },
   {
-    name: "vendor: edit a vendor DLL",
+    name: "IN-ROOM block: vendor edit a vendor DLL",
     tool: "edit",
     input: { filePath: "engine/vendor/libOrbbecSDK.dll" },
+    cwd: ROOM,
     expect: "block",
   },
   {
-    name: "vendor: write the scan DLL",
+    name: "IN-ROOM block: vendor write the scan DLL",
     tool: "write",
     input: { filePath: ".recon-cache/vendor/lib_orbbec_scan.dll" },
+    cwd: ROOM,
     expect: "block",
   },
   {
-    name: "listener: outside the room (cwd = build room)",
+    name: "IN-ROOM block: vendor copy over the scan DLL (shell write)",
+    tool: "shell",
+    input: { command: "copy build\\ours.dll lib_orbbec_scan.dll" },
+    cwd: ROOM,
+    expect: "block",
+  },
+  {
+    name: "IN-ROOM block: vendor read a quoted vendor DLL (exact operand)",
+    tool: "shell",
+    input: { command: 'cat "lib_orbbec_scan.dll"' },
+    cwd: ROOM,
+    expect: "block",
+  },
+  // --- must block OUT OF ROOM: the universal listener rule -------------------
+  {
+    name: "OUT-OF-ROOM block: listener test from the build room",
     tool: "shell",
     input: {
       command: "./build/tests/hardware/device_message_listener_test/device_message_listener_test",
     },
-    cwd: "C:\\Users\\Bruce\\Documents\\Github\\Open3DScanner-Win64-build",
+    cwd: OUT,
     expect: "block",
   },
   {
-    name: "listener: no cwd, plugin location is not the room",
+    name: "OUT-OF-ROOM block: listener test, cwd not the room",
     tool: "shell",
     input: { command: "data_process_message_listener_test.exe" },
+    cwd: OUT,
     expect: "block",
   },
-  // --- must allow ---------------------------------------------------------
+  // --- must allow IN THE ROOM: ordinary hardware-room work -------------------
   {
-    name: "build: vcvars + cmake",
+    name: "IN-ROOM allow: vcvars + cmake build",
     tool: "shell",
     input: {
       command:
         `call "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Auxiliary\\Build\\vcvars64.bat" && cmake --build build --parallel`,
     },
+    cwd: ROOM,
     expect: "allow",
   },
   {
-    name: "toolchain: bare PATH export (no module named)",
+    name: "IN-ROOM allow: bare PATH export (no module named)",
     tool: "shell",
     input: { command: "set PATH=C:\\tools\\ninja;%PATH%" },
+    cwd: ROOM,
     expect: "allow",
   },
   {
-    name: "git: status",
+    name: "IN-ROOM allow: git status",
     tool: "shell",
     input: { command: "git status --short" },
+    cwd: ROOM,
     expect: "allow",
   },
   {
-    name: "cmake: configure",
+    name: "IN-ROOM allow: cmake configure",
     tool: "shell",
     input: { command: "cmake -S . -B build -G Ninja" },
+    cwd: ROOM,
     expect: "allow",
   },
   {
-    name: "verify-pr: tier query",
+    name: "IN-ROOM allow: verify-pr tier query",
     tool: "shell",
     input: { command: "python scripts/verify-pr.py --tier 1" },
+    cwd: ROOM,
     expect: "allow",
   },
   {
-    name: "read: the ABI header (contract, not a vendor artifact)",
+    name: "IN-ROOM allow: read the ABI header",
     tool: "read",
     input: { filePath: "engine/include/openscanner/obscan_api.h" },
+    cwd: ROOM,
     expect: "allow",
   },
   {
-    name: "read: a findings doc",
+    name: "IN-ROOM allow: read a findings doc",
     tool: "read",
     input: { filePath: "docs/recon/findings/scan-live-data.md" },
+    cwd: ROOM,
     expect: "allow",
   },
   {
-    name: "listener: from the room (cwd)",
+    name: "IN-ROOM allow: listener test from the room (cwd)",
     tool: "shell",
     input: {
       command: "./build/tests/hardware/device_message_listener_test/device_message_listener_test",
     },
-    cwd: "C:\\dev\\Open3DScanner-Win64-wt-hw",
+    cwd: ROOM,
     expect: "allow",
   },
   {
-    name: "listener: explicit room path in the command",
+    name: "IN-ROOM allow: listener test naming the room in the command",
     tool: "shell",
     input: {
       command:
         "cd C:\\dev\\Open3DScanner-Win64-wt-hw && ./build/tests/hardware/data_process_message_listener_test/data_process_message_listener_test",
     },
+    cwd: OUT,
+    expect: "allow",
+  },
+  {
+    name: "IN-ROOM allow: FP1 tool-dir PATH prepend (no module named)",
+    tool: "shell",
+    input: {
+      command:
+        `$env:PATH = "C:\\Users\\Bruce\\tools\\gh;C:\\Users\\Bruce\\AppData\\Local\\GitHubDesktop\\app-3.6.7\\resources\\app\\git\\cmd;$env:PATH"; gh pr view 6`,
+    },
+    cwd: ROOM,
+    expect: "allow",
+  },
+  {
+    name: "IN-ROOM allow: FP2 prose naming a vendor artifact",
+    tool: "shell",
+    input: {
+      command:
+        `gh pr comment 6 --body "the platform registry rows name libOrbbecSDK.1.7.1.dylib and lib_orbbec_scan.dll"`,
+    },
+    cwd: ROOM,
+    expect: "allow",
+  },
+  {
+    name: "IN-ROOM allow: write a doc that names the artifact",
+    tool: "shell",
+    input: { command: `Set-Content notes.md "liborbbec_scan.dll is a vendor artifact"` },
+    cwd: ROOM,
+    expect: "allow",
+  },
+  // --- must allow OUT OF ROOM: inert except the listener rule ---------------
+  {
+    name: "OUT-OF-ROOM allow: FP1 tool-dir PATH prepend so gh finds git",
+    tool: "shell",
+    input: {
+      command:
+        `$env:PATH = "C:\\Users\\Bruce\\tools\\gh;C:\\Users\\Bruce\\AppData\\Local\\GitHubDesktop\\app-3.6.7\\resources\\app\\git\\cmd;$env:PATH"; gh pr view 6`,
+    },
+    cwd: OUT,
+    expect: "allow",
+  },
+  {
+    name: "OUT-OF-ROOM allow: FP2 a PR body that NAMES vendor artifacts",
+    tool: "shell",
+    input: {
+      command:
+        `gh pr comment 6 --body "the platform registry rows name libOrbbecSDK.1.7.1.dylib and lib_orbbec_scan.dll"`,
+    },
+    cwd: OUT,
+    expect: "allow",
+  },
+  {
+    name: "OUT-OF-ROOM allow: FP1+FP2 PATH prepend plus a body naming artifacts",
+    tool: "shell",
+    input: {
+      command:
+        `$env:PATH = "C:\\Users\\Bruce\\tools\\gh;C:\\Users\\Bruce\\AppData\\Local\\GitHubDesktop\\app-3.6.7\\resources\\app\\git\\cmd;$env:PATH"; gh pr comment 6 --body "libOrbbecSDK.1.7.1.dylib / lib_orbbec_scan.dll"`,
+    },
+    cwd: OUT,
+    expect: "allow",
+  },
+  {
+    name: "OUT-OF-ROOM allow: write a doc that names the artifact",
+    tool: "shell",
+    input: { command: `Set-Content notes.md "liborbbec_scan.dll is a vendor artifact"` },
+    cwd: OUT,
+    expect: "allow",
+  },
+  {
+    name: "OUT-OF-ROOM allow: commit message naming the artifact",
+    tool: "shell",
+    input: { command: `git commit -m "document libOrbbecSDK"` },
+    cwd: OUT,
+    expect: "allow",
+  },
+  {
+    name: "OUT-OF-ROOM allow: injection primitive is inert outside the room",
+    tool: "shell",
+    input: { command: `powershell -c "[Dll]::SetDllDirectory('C:\\evil')"` },
+    cwd: OUT,
+    expect: "allow",
+  },
+  {
+    name: "OUT-OF-ROOM allow: vendor shell read is inert outside the room",
+    tool: "shell",
+    input: { command: "strings .recon-cache/vendor/libOrbbecSDK.dll" },
+    cwd: OUT,
     expect: "allow",
   },
 ];
