@@ -31,25 +31,21 @@ if this procedure matches theirs.
 | 2 | The page is served | `GET http://127.0.0.1:<port>/` returns **200** with `Content-Type: text/html` — *not* a zero-byte close |
 | 3 | WebSocket streams | an upgrade on `/` returns **101** and frames arrive |
 | 4 | Guard armed | the hardware rules are scoped to this room (`-wt-hw` in the path); a listener test outside it is blocked |
-| 5 | Device attached | `Get-PnpDevice -PresentOnly` shows `VID_2BC5` interfaces (Depth/IR/RGB) |
+| 5 | Device enumerated on this host at run time | `Get-PnpDevice -PresentOnly` shows `VID_2BC5` interfaces (Depth/IR/RGB); the operator schedules placement; an unenumerated device is a **precondition failure**, not a test result |
 | 6 | Daemon up | on Windows the RPC daemon is started by `CrealityScan.exe` — launch the app; there is no separate service |
 | 7 | Interposer | **N/A for interposer (macOS-only)** — the Vulkan interposer is a macOS-only mechanism and this lane cannot reproduce it; the preflight instead asserts the loader's vendor DLL `C:\Program Files\CrealityScan\CrealityScan_Data\Plugins\x86_64\lib_orbbec_scan.dll` **loads** (`LoadLibraryExA` + `obscan_context_create` resolves) and the RPC daemon host from #6 is running |
 
 If 2 or 3 fails, the tree is behind the parent (see PLAN #115) and the run would
 compare a number against nothing.
 
-### Attach sequence — one SDK user at a time
+### Run window — operator-owned placement
 
-The scanner is a single-client device; a second SDK user is the hard error. Do
-this in order, before starting:
+The operator schedules the run and places the device. **Do not plan, sequence or
+document a cable move or a host allocation.**
 
-1. Confirm the Mac is not mid-run — no live session and no hardware test in
-   progress.
-2. Move the USB cable from the Mac to this Windows machine.
-3. Attach the scanner and confirm it enumerates: `Get-PnpDevice -PresentOnly`
-   shows `VID_2BC5` interfaces.
-4. Confirm the daemon state: launch `CrealityScan.exe` so its RPC daemon is up;
-   there is no separate service.
+Before starting, confirm on this host: the device is enumerated, `CrealityScan`
+and its RPC daemon are up, and **no other SDK user** is active. If the device is
+not enumerated, stop — that is a precondition failure, not a test result.
 
 ## Commands
 
@@ -160,10 +156,10 @@ procedure and it is not optional.
 
 - **60 fps is unobserved.** The parent has never seen a 60 fps profile; only the
   requested 50. The vendor UI's own selector is the direct check, and it needs
-  the device attached and the app open. Do not report 60 fps as available on the
-  strength of the vendor's advertising.
+  the device enumerated on this host and the app open. Do not report 60 fps as
+  available on the strength of the vendor's advertising.
 - **The Windows tree's divergence is recorded as a diff** (PLAN #115), so a
   number that differs from the parent's is first suspected as a tree difference,
   not a platform one.
-- **One device user at a time.** If the Mac is running a hardware test, this run
-  does not start — a second SDK user on the same device is the hard error.
+- **One device user at a time.** No second SDK user on the device; the operator
+  confirms the run window.
