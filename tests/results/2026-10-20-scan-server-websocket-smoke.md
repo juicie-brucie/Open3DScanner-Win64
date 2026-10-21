@@ -30,7 +30,7 @@ No arguments were passed, so `scan_server` ran in its default mode (synthetic po
 | # | Check | Result |
 | --- | --- | --- |
 | 1 | process starts, binds the WebSocket server | **[PASS]** `Streaming synthetic point-cloud frames on ws://0.0.0.0:8787` |
-| 2 | sustained operation, no error/warning in perf telemetry | **[PASS]** 52 consecutive `[perf]` lines over ~260 s, steady `rate=~24/s`, no error or warning lines anywhere in the log |
+| 2 | sustained operation, no error/warning in perf telemetry | **[PASS]** 49 consecutive `[perf]` lines over ~245 s, steady `rate=~24/s`, no error or warning lines anywhere in the log |
 | 3 | process survives the full observed window without crashing | **[PASS]** no crash, no exception text, no unexpected exit before termination was requested |
 | 4 | clean shutdown path exercised | **[NOT OBSERVED]** `taskkill` without `/F` reported `This process can only be terminated forcefully (with /F option)` — no console attached to deliver Ctrl+C/SIGINT through this harness, so the graceful-teardown path (`tools/scan_server/main.cpp`'s SIGINT/SIGTERM handling, per board #33) was not exercised; termination was `taskkill /F`, and the process's own exit code under that path was `1` |
 

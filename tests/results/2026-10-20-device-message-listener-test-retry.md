@@ -36,7 +36,7 @@ build\tests\hardware\device_message_listener_test\device_message_listener_test.e
 
 Not run (environment-level skip, not a failure): `remove-then-add` — `[worker] skipping remove-then-add (remove symbol unavailable)`; `remove entry point resolved: NO (Windows: the existing loader exposes no arbitrary-symbol resolver; OQ-3 remove/re-add checks SKIPPED - not equivalent to a Mac run)`.
 
-A `GVCPClient.cpp:355 sendto failed with error:10038` line appeared twice (20:32:11.048760 and a burst of 3 logs ending 20:32:13.076864/14.063254) during device/network enumeration; it did not affect any `[PASS]` check and the worker reported `failures=0`.
+The `GVCPClient.cpp:355 sendto failed with error:10038` error appeared in two log lines but four occurrences — one at 20:32:11.048760 and a collapsed burst of 3 ending 20:32:13.076864/14.063254 — during device/network enumeration; it did not affect any `[PASS]` check and the worker reported `failures=0`.
 
 ## Crash sweep
 
@@ -52,4 +52,4 @@ Output: `no Windows crash-report source available - sweep not performed`
 
 ## Board
 
-- Row move: #<n> `blocked` → `pass` — daemon precondition (CrealityScan.exe) is now satisfied after the user's power cycle and restart; the retry ran to completion with `failures=0` and no crash-report artifact. Prior blocked record (`2026-10-20-device-message-listener-test-blocked.md`) left unedited.
+- No board move proposed. The listener PASS is the hardware confirmation for `win #122`/`#117`; the reconcile assigns the row note. The daemon precondition (CrealityScan.exe) was satisfied on the retry; the prior blocked record is left unedited. The crash sweep reported `no Windows crash-report source available - sweep not performed` — that is “no source was available to check”, not “no crash occurred”.

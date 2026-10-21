@@ -36,13 +36,12 @@ no run start timestamp and nothing to sweep for. Postflight was not invoked.
 ## On failure or block — observable + one lead
 
 - Observable: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\hw-preflight.ps1 raptor_client` exited `1` with verbatim stderr `hw-preflight: FAIL - no built binary named 'raptor_client.exe' under build/ - build it first.` No `build\tools\raptor_client\raptor_client.exe` or any `build\**\raptor_client.exe` exists in this worktree.
-- Lead: likely the raptor_client target has not been built in this worktree (build system / CMake target configuration, not a runtime issue).
+- Lead: the fork deliberately excludes `tools/raptor_client` (`docs/recomp/PARITY.md`:23; `PLAN.md` `win #115`); the binary will not appear in this tree. The parent's `_WIN32` shim plus a later `tools/` sync is the only route. This is a scope exclusion, not a build omission.
 
 ## Open questions
 
-- Has `raptor_client` ever been built in this worktree, or is this the first attempt to run it here?
-- Should the build step run before preflight is retried, and who owns triggering that build?
+- The target is excluded by design; the route is the parent's `_WIN32` shim plus a later `tools/` sync. No local build is owed.
 
 ## Board
 
-- Row move: raptor_client hardware run stays in its current "to run" / not-yet-attempted state — it cannot move to a passed/failed state because the gate never reached execution; the dispatcher should route this to whoever owns building `raptor_client` before re-dispatching the hardware run.
+- No board move. The target is excluded by design, not a build omission; the run returns when the parent's shim lands and a `tools/` sync brings it.
