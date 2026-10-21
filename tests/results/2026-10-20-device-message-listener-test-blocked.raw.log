@@ -1,0 +1,4 @@
+$ powershell -NoProfile -ExecutionPolicy Bypass -File "scripts/hw-preflight.ps1" device_message_listener_test
+hw-preflight: FAIL - daemon: NOT running - launch CrealityScan.exe before the run
+SDK version 3.5.3.260921
+EXIT:1

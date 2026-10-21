@@ -1,0 +1,3 @@
+$ powershell -NoProfile -ExecutionPolicy Bypass -File "scripts\hw-preflight.ps1" raptor_client
+hw-preflight: FAIL - no built binary named 'raptor_client.exe' under build/ - build it first.
+exit code: 1
