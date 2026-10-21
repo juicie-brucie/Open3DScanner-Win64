@@ -46,6 +46,16 @@ every run.
 | C | lower-bandwidth / slower-start profile | build the one-line `main.cpp:1006` variant (`OB_SCAN_FRAME_RATE_STANDARD` or `BALANCED`); rebuild; run that binary as the only variable |
 | D | auto-exposure / frameset budget | D is only half exposed: the default is already no auto-exposure (manual 900). The one D variable that exists is auto-exposure via the UI `set_exposure` (`auto:true`, or a different manual value). The frameset-budget half is **not exposed** by the ABI; record that and do not fake it. |
 
+**Variant (in preparation, not yet in this tree).** If the USB port and cable
+runs (A, B) fail, the lower-bandwidth profile becomes a command-line flag
+instead of a rebuild: the builder is adding `--frame-rate standard|balanced|fast`
+on branch `build/win-isolation-variant`, so run C becomes a command-line change,
+e.g. `build\tools\scan_server\scan_server.exe --live 8787 "" 60 --frame-rate standard`.
+**That branch does not exist in this tree yet**, and the flag's exact spelling and
+position are unverified — re-read the branch and correct this line before
+the run. The **baseline A–C ladder stays first**: the variant is only
+reached if the port and cable runs fail, so that each run changes one variable.
+
 ## Per run
 
 1. **Preflight**, from the room root:
@@ -54,9 +64,15 @@ every run.
    `daemon: running`, exit 0. If it fails, stop; that is the finding.
 2. **Run** from the repo root (the server finds `ui/` relative to cwd):
    ```powershell
-   build\tools\scan_server\scan_server.exe --live 8787 "C:\Program Files\CrealityScan\CrealityScan_Data\Plugins\x86_64\lib_orbbec_scan.dll" 60
+   build\tools\scan_server\scan_server.exe --live 8787 "" 60
    ```
-   Capture the full stdout/stderr to
+   The empty library path is deliberate: the server resolves the installed
+   vendor DLL itself. **Let it exit on its own** — the bounded session is the
+   clean-exit mechanism (`main.cpp:707-713`: *"Let it finish on its own; don't
+   pkill it"*): the worker stops streaming after the session and runs the
+   normal pause/stop/destroy teardown. **Do not `taskkill /F` an isolation
+   run**, and record the launcher's and the worker's exit code as the teardown
+   result. Capture the full stdout/stderr to
    `tests/results/<date>-win-iso-<slug>.raw.log` (append, do not rewrite).
 3. **Observe / record** in the new `tests/results/<date>-win-iso-<slug>.md`:
    - the eight header fields (see `tests/results/_TEMPLATE.md`);
