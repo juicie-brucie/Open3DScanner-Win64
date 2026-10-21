@@ -27,10 +27,10 @@ All live-path knobs are in `tools/scan_server/main.cpp`; the ABI header is
 | Variable | Where / exact knob | Per-run change |
 | --- | --- | --- |
 | Session length | `main.cpp:1614-1629`: `--live [port] [library_path] [session_seconds]` | pass `60` as the third positional |
-| Profile / fps | `main.cpp:1004-1017` builds `ObScanConfig`; `:1006` `frame_rate = OB_SCAN_FRAME_RATE_AUTO`; enum `obscan_api.h:136-139` (`AUTO`, `STANDARD`, `BALANCED`, `FAST`); `:1007` projection, `:1008` scan mode, `:1009` accuracy, `:1011` FOV, `:1015-1016` voxels | **hardcoded; no CLI flag.** Minimal C variant: change `:1006` to `OB_SCAN_FRAME_RATE_STANDARD` (or `BALANCED`) and rebuild. The parent's `start_stream [6,9,1920,1200,50]` vector is not used by this server; there is no resolution field in `ObScanModeConfig`. |
+| Profile / fps | `main.cpp:1004-1017` builds `ObScanConfig`; `:1006` `frame_rate = OB_SCAN_FRAME_RATE_AUTO`; enum `obscan_api.h:136-139` (`AUTO`, `STANDARD`, `BALANCED`, `FAST`); `:1007` projection, `:1008` scan mode, `:1009` accuracy, `:1011` FOV, `:1015-1016` voxels | **hardcoded on the main-room build; no CLI flag.** Minimal C variant: change `:1006` to `OB_SCAN_FRAME_RATE_STANDARD` (or `BALANCED`) and rebuild. On the variant branch it is a flag instead — `--frame-rate`, see the variant note below — so no rebuild is needed there. The parent's `start_stream [6,9,1920,1200,50]` vector is not used by this server; there is no resolution field in `ObScanModeConfig`. |
 | Exposure / laser | `main.cpp:1028` `obscan_scan_config_combined_exposure_and_laser_current(scan, 900)`; range/default `:459-461` (1–1000, default 900); UI command `set_exposure` `:507-517`, e.g. `{"cmd":"set_exposure","auto":true}` or `{"cmd":"set_exposure","value":N}`; default manual 900 at `:1090-1093`; re-assert `:1187-1193` | UI command; no CLI. The separate `config_ir_exposure_time` / `config_color_exposure_time` / `config_laser_current` setters (`obscan_api.h:736-738`) are not used by this server. |
 | Frameset / queue budget | no setter in the ABI; only the `FRAME_BUFFER_FULL` message (`obscan_api.h:492`). The vendor queue is internal. `main.cpp:1246` `kLiveBroadcastPointBudget=20000` is the UI broadcast budget, not the vendor frameset. | **not exposed; do not improvise a vendor call.** |
-| Start cadence | `main.cpp:702-704` `kDeviceWaitAttempts=30`, `kDeviceWaitIntervalMs=200`, `kWantStableFrames=10`; wait loop `:1031-1035`; `obscan_scan_start` `:1041-1042` | hardcoded; a slower-start variant is a code change (raise `kWantStableFrames` or add a `sleep_for` before `:1041`) and rebuild. Separate variable from C. |
+| Start cadence | `main.cpp:702-704` `kDeviceWaitAttempts=30`, `kDeviceWaitIntervalMs=200`, `kWantStableFrames=10`; wait loop `:1031-1035`; `obscan_scan_start` `:1041-1042` | hardcoded on the main-room build: a slower start is a code change (raise `kWantStableFrames` or add a `sleep_for` before `:1041`) and rebuild. On the variant branch it is the `--slow-start` flag (5 s before `obscan_scan_start`), no rebuild. **Separate variable from C** — its own run (C2), never combined with a frame rate. |
 | Tick / poll | `main.cpp:715` `kLiveTickIntervalMs=100` | hardcoded; our polling, not the vendor pipeline |
 
 ## Runs — one variable per run, 60 s each
@@ -43,17 +43,48 @@ every run.
 | Baseline | current port/cable, default profile (as built), app open | 60 s live smoke |
 | A | different USB port | direct rear I/O, **not a hub**; label the port in the record |
 | B | different cable, if one is available | label the cable; otherwise record "no second cable" |
-| C | lower-bandwidth / slower-start profile | build the one-line `main.cpp:1006` variant (`OB_SCAN_FRAME_RATE_STANDARD` or `BALANCED`); rebuild; run that binary as the only variable |
+| C | lower-bandwidth profile (frame rate) | the **variant binary** (see the variant note below), built from `build/win-isolation-variant` in a **separate worktree and build dir** so the main hw room and its baseline binary stay undisturbed: `--frame-rate standard` or `--frame-rate balanced`. The frame rate is the only variable |
+| C2 | slower start | the **variant binary**, same separate worktree and build dir: `build\tools\scan_server\scan_server.exe --live 8787 "" 60 --slow-start` (5 s before `obscan_scan_start`). One variable, and the same stop rule as every other row — a run that streams without crashing is a candidate configuration |
 | D | auto-exposure / frameset budget | D is only half exposed: the default is already no auto-exposure (manual 900). The one D variable that exists is auto-exposure via the UI `set_exposure` (`auto:true`, or a different manual value). The frameset-budget half is **not exposed** by the ABI; record that and do not fake it. |
 
-**Variant (in preparation, not yet in this tree).** If the USB port and cable
-runs (A, B) fail, the lower-bandwidth profile becomes a command-line flag
-instead of a rebuild: the builder is adding `--frame-rate standard|balanced|fast`
-on branch `build/win-isolation-variant`, so run C becomes a command-line change,
-e.g. `build\tools\scan_server\scan_server.exe --live 8787 "" 60 --frame-rate standard`.
-**That branch does not exist in this tree yet**, and the flag's exact spelling and
-position are unverified — re-read the branch and correct this line before
-the run. The **baseline A–C ladder stays first**: the variant is only
+**Variant (confirmed).** If the USB port and cable runs (A, B) fail, the
+lower-bandwidth profile is a **command-line flag**, not a rebuild: branch
+`build/win-isolation-variant` @ `46dcf0b` (built 44/44 in a fresh separate dir)
+adds two levers to `scan_server`:
+
+- `--frame-rate auto|standard|balanced|fast` — selects
+  `ObScanModeConfig.frame_rate`. The default `auto` is the pre-existing
+  behaviour; an unknown value is refused (exit 2).
+- `--slow-start` — waits 5 s before `obscan_scan_start`; default off.
+
+So run C is — **frame rate only**:
+
+```powershell
+build\tools\scan_server\scan_server.exe --live 8787 "" 60 --frame-rate standard
+build\tools\scan_server\scan_server.exe --live 8787 "" 60 --frame-rate balanced
+```
+
+`--slow-start` is a **separate run** (C2, in the table below), never combined
+with a frame rate: one variable per run, or the survivor is unattributable.
+
+The launcher passes both levers to the worker through the environment
+(`OPENSCANNER_FRAME_RATE`, `OPENSCANNER_SLOW_START`) and sets them explicitly,
+so an inherited shell value cannot change a default run; the worker's positional
+argv contract is unchanged. The two levers are **never combined in one run** — one is the variable, the other stays at its default. The launcher and the worker each print
+`isolation: frame_rate=<name> slow_start=<on|off>` — **record that line**, it is
+the proof of which variant ran. The tick cadence, the teardown, the vendor calls
+and the six-cell measurement are untouched by the variant.
+
+**Fork-only experimental — do not merge.** The variant is a change over a
+**parent-synced** file (`tools/scan_server/main.cpp`) and is experimental: it
+must not be merged without a parent-sync decision. The **baseline binary stays
+the main-room build**; the variant is built in its own worktree and its own
+build dir, so the main hw room and its baseline binary are undisturbed. (The
+branch also carries stale copies of the board and the runbooks, because it was
+cut before the last board merge — rebase it before any PR, and never take the
+baseline binary from it.)
+
+The **baseline ladder stays first, in order A, B, C, C2, D**: the variant is only
 reached if the port and cable runs fail, so that each run changes one variable.
 
 ## Per run
