@@ -14,7 +14,12 @@
 //   teardown. Set OPENSCANNER_TICK_PERF=0 to disable it.
 //
 //   scan_server --live [port] [path] [seconds] [--record <file>]
+//                                 [--frame-rate auto|standard|balanced|fast]
+//                                 [--slow-start]
 //       Drives a real OBScan session; --record writes V1 frames to <file>.
+//       --frame-rate selects ObScanModeConfig.frame_rate (default auto, the
+//       pre-existing behavior); --slow-start waits 5 s before obscan_scan_start
+//       (default off). Both are fork-only experimental isolation levers.
 //       Plane removal (findings plane-removal.md §3), env-driven:
 //         OPENSCANNER_PLANE_REMOVE=1            auto plane removal on
 //         OPENSCANNER_TURNTABLE_PLANE_REMOVE=1  turntable plane removal on
@@ -713,6 +718,31 @@ constexpr int kWantStableFrames = 10;
 // in the past. Let it finish on its own; don't pkill it.
 int g_live_session_seconds = 300;
 constexpr int kLiveTickIntervalMs = 100;  // ~10Hz live-frame polling.
+constexpr int kSlowStartDelaySeconds = 5;
+
+bool ParseFrameRateName(const std::string& name, ObScanFrameRate* out) {
+    if (name == "auto") { *out = OB_SCAN_FRAME_RATE_AUTO; return true; }
+    if (name == "standard") { *out = OB_SCAN_FRAME_RATE_STANDARD; return true; }
+    if (name == "balanced") { *out = OB_SCAN_FRAME_RATE_BALANCED; return true; }
+    if (name == "fast") { *out = OB_SCAN_FRAME_RATE_FAST; return true; }
+    return false;
+}
+
+const char* FrameRateName(ObScanFrameRate rate) {
+    switch (rate) {
+        case OB_SCAN_FRAME_RATE_AUTO: return "auto";
+        case OB_SCAN_FRAME_RATE_STANDARD: return "standard";
+        case OB_SCAN_FRAME_RATE_BALANCED: return "balanced";
+        case OB_SCAN_FRAME_RATE_FAST: return "fast";
+        default: return "unknown";
+    }
+}
+
+#if defined(_WIN32)
+bool SetEnvVar(const char* name, const char* value) { return ::_putenv_s(name, value) == 0; }
+#else
+bool SetEnvVar(const char* name, const char* value) { return setenv(name, value, 1) == 0; }
+#endif
 
 std::atomic<bool> g_got_connect_message{false};
 std::atomic<int> g_frame_ready_count{0};
@@ -922,6 +952,24 @@ void Report(const char* step, ObScanStatus status) {
 
 int RunLiveServer(const std::string& library_path, uint16_t port, const std::string& record_path = "") {
     g_record_path = record_path;
+
+    // Isolation variant: the launcher sets these in the child's inherited
+    // environment (CreateProcessW with a null env block / fork+exec). The
+    // worker's positional argv contract is unchanged.
+    ObScanFrameRate frame_rate = OB_SCAN_FRAME_RATE_AUTO;
+    const char* frame_rate_env = std::getenv("OPENSCANNER_FRAME_RATE");
+    if (frame_rate_env != nullptr && frame_rate_env[0] != '\0') {
+        if (!ParseFrameRateName(frame_rate_env, &frame_rate)) {
+            std::fprintf(stderr, "[worker] invalid OPENSCANNER_FRAME_RATE '%s'; using auto\n", frame_rate_env);
+            frame_rate = OB_SCAN_FRAME_RATE_AUTO;
+        }
+    }
+    const char* slow_env = std::getenv("OPENSCANNER_SLOW_START");
+    const bool slow_start = slow_env != nullptr && std::string(slow_env) == "1";
+    std::printf("[worker] isolation: frame_rate=%s slow_start=%s\n",
+                FrameRateName(frame_rate), slow_start ? "on" : "off");
+    std::fflush(stdout);
+
     QuitTraceInit();
     QuitTrace("RunLiveServer: installing signal handlers");
     std::signal(SIGINT, &OnStopSignal);
@@ -1003,7 +1051,7 @@ int RunLiveServer(const std::string& library_path, uint16_t port, const std::str
     // the full history of how each field was determined).
     ObScanConfig scan_config = {};
     scan_config.mode_config.post_texture = OB_SCAN_NO_TEXTURE;
-    scan_config.mode_config.frame_rate = OB_SCAN_FRAME_RATE_AUTO;
+    scan_config.mode_config.frame_rate = frame_rate;
     scan_config.mode_config.projection = OB_SCAN_BLUE_LINE_LASER;
     scan_config.mode_config.scan_mode = OB_SCAN_MODE_OBJECT_MEDIUM;
     scan_config.mode_config.accuracy = OB_SCAN_ACCURACY_HIGH;
@@ -1037,6 +1085,12 @@ int RunLiveServer(const std::string& library_path, uint16_t port, const std::str
     }
     std::printf("[worker] frame_ready_count=%d\n", g_frame_ready_count.load());
     std::fflush(stdout);
+
+    if (slow_start) {
+        std::printf("[worker] slow-start: waiting %ds before obscan_scan_start\n", kSlowStartDelaySeconds);
+        std::fflush(stdout);
+        std::this_thread::sleep_for(std::chrono::seconds(kSlowStartDelaySeconds));
+    }
 
     status = lib.obscan_scan_start(scan);
     Report("obscan_scan_start", status);
@@ -1612,17 +1666,36 @@ int RunLiveMode(int argc, char** argv) {
     std::signal(SIGINT, SIG_IGN);
 
     // scan_server --live [port] [library_path] [session_seconds]
+    //             [--record <file>] [--frame-rate auto|standard|balanced|fast]
+    //             [--slow-start]
     uint16_t port = 8787;
     std::string library_path;
     int session_seconds = g_live_session_seconds;
     std::string record_path;
+    std::string frame_rate_name = "auto";
+    bool slow_start = false;
     std::vector<std::string> positional;
     for (int i = 2; i < argc; ++i) {
-        if (std::string(argv[i]) == "--record" && i + 1 < argc) {
+        const std::string arg = argv[i];
+        if (arg == "--record" && i + 1 < argc) {
             record_path = argv[++i];
+        } else if (arg == "--frame-rate") {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "--frame-rate needs a value (auto|standard|balanced|fast)\n");
+                return 2;
+            }
+            frame_rate_name = argv[++i];
+        } else if (arg == "--slow-start") {
+            slow_start = true;
         } else {
-            positional.push_back(argv[i]);
+            positional.push_back(arg);
         }
+    }
+    ObScanFrameRate frame_rate = OB_SCAN_FRAME_RATE_AUTO;
+    if (!ParseFrameRateName(frame_rate_name, &frame_rate)) {
+        std::fprintf(stderr, "invalid --frame-rate '%s' (want auto|standard|balanced|fast)\n",
+                     frame_rate_name.c_str());
+        return 2;
     }
     if (positional.size() > 0) port = static_cast<uint16_t>(std::atoi(positional[0].c_str()));
     if (positional.size() > 1) library_path = positional[1];
@@ -1652,6 +1725,20 @@ int RunLiveMode(int argc, char** argv) {
 
     std::printf("[launcher] Running live scan server in a worker process (up to %ds)...\n", session_seconds);
     std::fflush(stdout);
+
+    // Pass the isolation levers to the worker through the inherited
+    // environment (CreateProcessW null env block / fork+exec); the worker's
+    // positional argv contract stays unchanged. Set both explicitly so an
+    // inherited shell value cannot alter the default run.
+    if (!SetEnvVar("OPENSCANNER_FRAME_RATE", frame_rate_name.c_str()) ||
+        !SetEnvVar("OPENSCANNER_SLOW_START", slow_start ? "1" : "0")) {
+        std::fprintf(stderr, "failed to set the live worker's isolation environment\n");
+        return 2;
+    }
+    std::printf("[launcher] isolation: frame_rate=%s slow_start=%s\n",
+                FrameRateName(frame_rate), slow_start ? "on" : "off");
+    std::fflush(stdout);
+
     int worker_exit_code = -1;
     std::string crash_reason;
     // Budget: device-connect (<=6s) + frame-ready wait (<=20s) +
