@@ -60,10 +60,32 @@ working directory, and the port is positional (there is no `--synthetic` flag;
 synthetic is the default mode, live is `--live`):
 
 ```powershell
-# synthetic sanity first (no device), then the real run
+# synthetic sanity first (no device) - it has no session bound
 <build>\tools\scan_server\scan_server.exe 8787
-<build>\tools\scan_server\scan_server.exe --live 8787
 ```
+
+**The live run is bounded, and it exits on its own:**
+
+```powershell
+<build>\tools\scan_server\scan_server.exe --live 8787 "" 30
+```
+
+`--live [port] [library_path] [session_seconds]` (`main.cpp:1614-1629`): the
+third positional is the session length, and for this runbook it is the phase
+length — 30 s. The empty library path is deliberate: the server resolves
+the installed vendor DLL itself. **The bounded session is the clean-exit
+mechanism:** the server stops streaming after `session_seconds` and goes
+through the normal pause/stop/destroy teardown by itself. **Do not `taskkill
+/F` a live run** — `main.cpp:707-713` says it plainly: *"Let it finish on its
+own; don't pkill it"*, because killing the worker before it reaches
+`obscan_scan_stop`/`obscan_context_destroy` skips the teardown that used to
+need a physical power cycle to recover from. **Record the launcher's and the
+worker's exit code as the teardown result.**
+
+The **synthetic sanity** above has no session bound: stop it with Ctrl+C in an
+attached console. A forced kill is acceptable **for the synthetic sanity
+only**, and the record must say so. The 2026-10-20 synthetic smoke's forced
+kill is a **synthetic-mode harness limitation, not a live-path finding** — the live run above is bounded and exits on its own.
 
 Then open `http://127.0.0.1:8787/` in the page's browser for condition (b).
 
