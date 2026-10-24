@@ -17,5 +17,10 @@ GPPLog.txt
 # REA/Ghidra snapshots and local vendor binaries used for ABI recovery.
 # Large and reference-only — never committed. See docs/recon/README.md.
 /.recon-cache/
+
+# Raw USB wire captures (.pcapng) from tools/win_wire_capture. Large and
+# contain frame data — kept locally only, never committed. See
+# docs/recon/findings/win-uvc-wire-capture.md for the decoded spec.
+/captures/
 __pycache__/
 *.pyc
